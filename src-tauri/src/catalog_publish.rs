@@ -1043,7 +1043,7 @@ pub fn build_preview(
     // Build catalog URL: https://<owner>.github.io/<repo-name>/
     let (owner, repo_name) = match repo.split_once('/') {
         Some((o, r)) => (o, r),
-        None => ("xpunjabi", "a-collection-catalog"),
+        None => ("airdropia", "a-collection-catalog"),
     };
     let catalog_url = format!("https://{}.github.io/{}/", owner, repo_name);
 
@@ -1296,7 +1296,7 @@ pub async fn upload_to_github(
     // Build catalog URL
     let (owner, repo_name) = match repo.split_once('/') {
         Some((o, r)) => (o, r),
-        None => ("xpunjabi", "a-collection-catalog"),
+        None => ("airdropia", "a-collection-catalog"),
     };
     let catalog_url = format!("https://{}.github.io/{}/", owner, repo_name);
 
