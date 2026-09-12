@@ -956,7 +956,7 @@ async fn call_openai(
     let res = client.post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .header("HTTP-Referer", "https://github.com/xpunjabi/a-collection-head-office")
+        .header("HTTP-Referer", "https://github.com/airdropia/a-collection-head-office")
         .header("X-Title", "A Collection Head Office")
         .json(&payload)
         .send()
