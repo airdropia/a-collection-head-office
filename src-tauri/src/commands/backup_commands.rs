@@ -273,7 +273,7 @@ pub async fn import_from_catalog_json(
 
     // Default URL: live catalog
     let url = catalog_url.unwrap_or_else(|| {
-        "https://xpunjabi.github.io/a-collection-catalog/data/catalog.json".to_string()
+        "https://airdropia.github.io/a-collection-catalog/data/catalog.json".to_string()
     });
 
     // Derive the catalog's image base URL from the catalog.json URL.
