@@ -61,7 +61,7 @@ pub async fn preview_catalog_publish(
         };
         let repo = {
             let v = get_setting("catalog_repo");
-            if v.is_empty() { "xpunjabi/a-collection-catalog".to_string() } else { v }
+            if v.is_empty() { "airdropia/a-collection-catalog".to_string() } else { v }
         };
 
         // build_preview does file I/O (reading image sizes) but no async work,
@@ -107,7 +107,7 @@ pub async fn publish_catalog_to_github(
         };
         let repo = {
             let v = get_setting("catalog_repo");
-            if v.is_empty() { "xpunjabi/a-collection-catalog".to_string() } else { v }
+            if v.is_empty() { "airdropia/a-collection-catalog".to_string() } else { v }
         };
         let github_token = get_setting("catalog_github_token");
         if github_token.is_empty() {
