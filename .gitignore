@@ -15,3 +15,8 @@ release-artifacts/
 
 # Logo source
 logo image/
+
+# bun lockfile — repo uses npm (package-lock.json). bun install is allowed
+# locally for typechecking but its lockfile must not replace the npm one.
+bun.lock
+bun.lockb

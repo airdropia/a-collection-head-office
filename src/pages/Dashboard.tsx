@@ -21,7 +21,7 @@ interface ShareLog {
 }
 
 export default function Dashboard() {
-  const { products, setCurrentTab, fetchProducts } = useAppStore()
+  const { products, setCurrentTab, fetchProducts, fetchCustomers, customers } = useAppStore()
   const [agents, setAgents] = useState<AgentSummary[]>([])
   const [shareLogs, setShareLogs] = useState<ShareLog[]>([])
   const [staleProducts, setStaleProducts] = useState<Product[]>([])
@@ -29,6 +29,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchProducts()
+    // v0.34.0: load customers so the customer-khata net line can show on dashboard
+    fetchCustomers()
     loadProfitModeData()
   }, [])
 
@@ -149,6 +151,33 @@ export default function Dashboard() {
               ))}
             </div>
           )}
+          {/* v0.34.0: Customer (khata) net outstanding — agents + customers ek jagah.
+              Red/green direction: positive = lene hain, negative = dene hain. */}
+          {(() => {
+            const custNet = customers.reduce((s, c) => s + (c.outstanding_balance || 0), 0)
+            if (custNet === 0) return null
+            return (
+              <button
+                onClick={() => setCurrentTab('customers')}
+                className={`w-full mt-3 p-3 rounded-lg border flex items-center justify-between transition-colors ${
+                  custNet > 0 ? 'bg-emerald-900/10 border-emerald-700/30 hover:border-emerald-600/50'
+                              : 'bg-red-900/10 border-red-700/30 hover:border-red-600/50'
+                }`}>
+                <div className="flex items-center gap-2">
+                  <Users size={14} className={custNet > 0 ? 'text-emerald-400' : 'text-red-400'} />
+                  <div className="text-left">
+                    <div className={`text-xs font-semibold ${custNet > 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      Customer Khata — {custNet > 0 ? 'HO ko lena hai' : 'HO ko dena hai'}
+                    </div>
+                    <div className="text-[10px] text-gray-500">net across {customers.length} customers (agents ke alawa)</div>
+                  </div>
+                </div>
+                <div className={`text-sm font-bold ${custNet > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {fmtMoney(Math.abs(custNet))}
+                </div>
+              </button>
+            )
+          })()}
         </div>
 
         {/* RIGHT: Recent share activity */}

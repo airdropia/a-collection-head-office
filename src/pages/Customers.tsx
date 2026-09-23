@@ -919,8 +919,16 @@ export default function Customers() {
               )}
             </div>
             <div className="p-4 border-t border-gray-800 bg-slate-950/40 flex justify-between items-center">
+              {/* v0.34.0: red/green net balance — direction visible at a glance */}
               <span className="text-sm text-gray-400">Current Outstanding:</span>
-              <span className="text-lg font-bold text-amber-400">{fmtMoney(paymentCustomer.outstanding_balance || 0)}</span>
+              <span className={`text-lg font-bold ${
+                (paymentCustomer.outstanding_balance || 0) > 0 ? 'text-emerald-400' :
+                (paymentCustomer.outstanding_balance || 0) < 0 ? 'text-red-400' : 'text-gray-400'
+              }`}>
+                {(paymentCustomer.outstanding_balance || 0) < 0
+                  ? `Dene hain: ${fmtMoney(-(paymentCustomer.outstanding_balance || 0))}`
+                  : fmtMoney(paymentCustomer.outstanding_balance || 0)}
+              </span>
             </div>
           </div>
         </div>
@@ -942,9 +950,20 @@ export default function Customers() {
                 <p className="text-base font-semibold text-white">{paymentCustomer.name}</p>
                 <p className="text-xs text-gray-500">{paymentCustomer.phone || 'No phone'}</p>
               </div>
-              <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 flex justify-between items-center">
-                <span className="text-sm text-amber-300">Current Outstanding</span>
-                <span className="text-lg font-bold text-amber-400">{fmtMoney(paymentCustomer.outstanding_balance || 0)}</span>
+              {/* v0.34.0: red/green current balance — mirrors card badge colors */}
+              <div className={`rounded-lg p-3 flex justify-between items-center border ${
+                (paymentCustomer.outstanding_balance || 0) < 0
+                  ? 'bg-red-900/20 border-red-700/50'
+                  : 'bg-amber-900/20 border-amber-700/50'
+              }`}>
+                <span className={`text-sm ${(paymentCustomer.outstanding_balance || 0) < 0 ? 'text-red-300' : 'text-amber-300'}`}>
+                  Current Outstanding
+                </span>
+                <span className={`text-lg font-bold ${(paymentCustomer.outstanding_balance || 0) < 0 ? 'text-red-400' : 'text-amber-400'}`}>
+                  {(paymentCustomer.outstanding_balance || 0) < 0
+                    ? `Dene hain: ${fmtMoney(-(paymentCustomer.outstanding_balance || 0))}`
+                    : fmtMoney(paymentCustomer.outstanding_balance || 0)}
+                </span>
               </div>
               {/* v0.34.0: Direction chooser — the core fix. Which way does the money go?
                   Sign is derived from this, user never types a minus. */}
