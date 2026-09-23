@@ -23,14 +23,20 @@ jobs:
         shell: bash
         run: |
           CARGO_VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*= "\(.*\)".*/\1/')
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          echo "Cargo.toml version: $CARGO_VERSION"
-          echo "Tag version:         $TAG_VERSION"
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::Version mismatch — Cargo.toml=$CARGO_VERSION but tag=$TAG_VERSION. Bump all 3 files (Cargo.toml, tauri.conf.json, package.json) before tagging."
-            exit 1
+          # Manual dispatch (workflow_dispatch) sets GITHUB_REF_NAME to branch name (master),
+          # which is not a version. Only compare when triggered by a tag push.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            echo "Cargo.toml version: $CARGO_VERSION"
+            echo "Tag version:         $TAG_VERSION"
+            if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+              echo "::error::Version mismatch — Cargo.toml=$CARGO_VERSION but tag=$TAG_VERSION. Bump all 3 files (Cargo.toml, tauri.conf.json, package.json) before tagging."
+              exit 1
+            fi
+            echo "Version check passed."
+          else
+            echo "Manual dispatch — skipping tag version comparison."
           fi
-          echo "Version check passed."
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
