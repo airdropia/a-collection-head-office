@@ -59,9 +59,11 @@ export default function Customers() {
   const [balanceHistory, setBalanceHistory] = useState<any[]>([])
   const [showBalanceHistory, setShowBalanceHistory] = useState(false)
 
-  // v0.29.0: Manual ledger entry modal state (opening_debit + adjustment)
-  // Single modal handles both — type controlled by ledgerEntryType
   const [showLedgerEntryModal, setShowLedgerEntryModal] = useState(false)
+  // v0.34.0: Direction of ledger entry — 'udhaar' (customer owes us, positive) or
+  // 'advance' (we owe customer / they paid in advance, negative). Sign is derived
+  // from direction so the user never types a minus sign.
+  const [ledgerDirection, setLedgerDirection] = useState<'udhaar' | 'advance'>('udhaar')
   const [ledgerEntryType, setLedgerEntryType] = useState<'opening_debit' | 'adjustment'>('opening_debit')
   const [ledgerEntryAmount, setLedgerEntryAmount] = useState(0)
   const [ledgerEntryNotes, setLedgerEntryNotes] = useState('')
@@ -150,9 +152,11 @@ export default function Customers() {
   }
 
   // v0.26.0: Record payment against customer's outstanding balance
+  // v0.34.0: negative balance → settle our debt via negative adjustment instead,
+  // because record_customer_payment rejects amounts exceeding a positive balance.
   const handleOpenPaymentModal = (customer: Customer) => {
     setPaymentCustomer(customer)
-    setPaymentAmount(customer.outstanding_balance || 0)
+    setPaymentAmount(Math.abs(customer.outstanding_balance || 0))
     setPaymentNotes('')
     setShowPaymentModal(true)
   }
@@ -161,15 +165,27 @@ export default function Customers() {
     if (!paymentCustomer?.id) return
     if (paymentAmount <= 0) { alert('Payment amount must be positive.'); return }
     try {
-      await invoke('record_customer_payment', {
-        customerId: paymentCustomer.id,
-        amount: paymentAmount,
-        notes: paymentNotes || null,
-        saleId: null,
-      })
+      if ((paymentCustomer.outstanding_balance || 0) >= 0) {
+        // Normal flow: customer pays us
+        await invoke('record_customer_payment', {
+          customerId: paymentCustomer.id,
+          amount: paymentAmount,
+          notes: paymentNotes || null,
+          saleId: null,
+        })
+      } else {
+        // We owe the customer — record a negative adjustment to settle our debt
+        await invoke('add_customer_ledger_entry', {
+          customerId: paymentCustomer.id,
+          entryType: 'adjustment',
+          amount: -Math.abs(paymentAmount),
+          entryDate: null,
+          notes: paymentNotes || 'Settled advance debt (hum ne wapas diya)',
+        })
+      }
       setShowPaymentModal(false)
       await fetchCustomers()
-      alert(`Payment recorded! Rs. ${paymentAmount.toFixed(0)} from ${paymentCustomer.name}`)
+      alert(`Entry recorded! Rs. ${paymentAmount.toFixed(0)} — ${paymentCustomer.name}`)
     } catch (err) {
       alert(`Error: ${err}`)
     }
@@ -189,9 +205,11 @@ export default function Customers() {
   }
 
   // v0.29.0: Open modal for adding a manual ledger entry (opening_debit or adjustment)
-  const handleOpenLedgerEntryModal = (customer: Customer, type: 'opening_debit' | 'adjustment') => {
+  // v0.34.0: direction defaults to 'udhaar'; caller can preset 'advance' for negative balances
+  const handleOpenLedgerEntryModal = (customer: Customer, type: 'opening_debit' | 'adjustment', direction: 'udhaar' | 'advance' = 'udhaar') => {
     setPaymentCustomer(customer)
     setLedgerEntryType(type)
+    setLedgerDirection(direction)
     setLedgerEntryAmount(0)
     setLedgerEntryNotes('')
     // Default date = today (YYYY-MM-DD for <input type="date">)
@@ -199,17 +217,21 @@ export default function Customers() {
     setShowLedgerEntryModal(true)
   }
 
-  // v0.29.0: Save the manual ledger entry
+  // v0.34.0: Save the manual ledger entry. Sign comes from direction, not user input:
+  //   udhaar  → customer owes us → stored positive (opening_debit) or +adjustment
+  //   advance → we owe customer (advance payment / maal wapas) → adjustment stays
+  //             negative. opening_debit cannot be negative per backend invariant, so
+  //             an advance opening balance is stored as a negative 'adjustment'.
   const handleSaveLedgerEntry = async () => {
     if (!paymentCustomer?.id) return
-    if (ledgerEntryType === 'opening_debit' && ledgerEntryAmount <= 0) {
-      alert('Opening debit amount must be positive.')
+    const signedAmount = ledgerDirection === 'udhaar' ? Math.abs(ledgerEntryAmount) : -Math.abs(ledgerEntryAmount)
+    if (ledgerEntryAmount <= 0) {
+      alert('Amount must be greater than zero.')
       return
     }
-    if (ledgerEntryType === 'adjustment' && ledgerEntryAmount === 0) {
-      alert('Adjustment amount cannot be zero.')
-      return
-    }
+    // Backend invariant: opening_debit must be positive. An advance-direction
+    // entry is therefore always recorded as an 'adjustment' (signed amount).
+    const backendType = ledgerDirection === 'advance' ? 'adjustment' : ledgerEntryType
     try {
       // Convert date to ISO 8601 (with time)
       const isoDate = ledgerEntryDate
@@ -217,14 +239,14 @@ export default function Customers() {
         : null
       await invoke('add_customer_ledger_entry', {
         customerId: paymentCustomer.id,
-        entryType: ledgerEntryType,
-        amount: ledgerEntryAmount,
+        entryType: backendType,
+        amount: signedAmount,
         entryDate: isoDate,
         notes: ledgerEntryNotes || null,
       })
       setShowLedgerEntryModal(false)
       await fetchCustomers()
-      alert(`${ledgerEntryType === 'opening_debit' ? 'Opening balance' : 'Adjustment'} added for ${paymentCustomer.name}`)
+      alert(`Entry added for ${paymentCustomer.name}`)
     } catch (err) {
       alert(`Error: ${err}`)
     }
@@ -296,9 +318,12 @@ export default function Customers() {
     }
   }
 
-  // v0.26.0: Total outstanding across all customers
+  // v0.26.0: Total outstanding across all customers (net — can be negative if
+  // we owe customers more than they owe us)
   const totalOutstanding = customers.reduce((s, c) => s + (c.outstanding_balance || 0), 0)
   const customersWithUdhar = customers.filter(c => (c.outstanding_balance || 0) > 0).length
+  // v0.34.0: customers with negative balance — we owe them (advance/maal wapas)
+  const customersWeOwe = customers.filter(c => (c.outstanding_balance || 0) < 0).length
 
   const handlePlaceOrder = async () => {
     if (!selectedCustomerId) return
@@ -357,18 +382,37 @@ export default function Customers() {
         </button>
       </div>
 
-      {/* v0.26.0: Udhar Summary Bar — v0.33.0: color-coded (green=HO ko lena) */}
-      {totalOutstanding > 0 && (
-        <div className="glass-card p-4 mb-4 flex items-center justify-between bg-emerald-900/10 border-emerald-700/30">
+      {/* v0.34.0: Udhar Summary Bar — NET balance with red/green direction.
+          Positive net  = customers owe us  (green, HO ko lena hai)
+          Negative net  = we owe customers  (red, HO ko dena hai)
+          Shown whenever net is non-zero, in either direction. */}
+      {totalOutstanding !== 0 && (
+        <div className={`glass-card p-4 mb-4 flex items-center justify-between ${(
+          totalOutstanding > 0
+            ? 'bg-emerald-900/10 border-emerald-700/30'
+            : 'bg-red-900/10 border-red-700/30'
+        )}`}>
           <div className="flex items-center gap-3">
-            <Wallet className="text-emerald-400" size={24} />
+            <Wallet className={totalOutstanding > 0 ? 'text-emerald-400' : 'text-red-400'} size={24} />
             <div>
-              <p className="text-sm text-emerald-300">HO ko lena hai (Udhar)</p>
-              <p className="text-3xl font-bold text-emerald-400">{fmtMoney(totalOutstanding)}</p>
+              {totalOutstanding > 0 ? (
+                <>
+                  <p className="text-sm text-emerald-300">HO ko lena hai (Udhar)</p>
+                  <p className="text-3xl font-bold text-emerald-400">{fmtMoney(totalOutstanding)}</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-red-300">HO ko dena hai (Advance/Wapas)</p>
+                  <p className="text-3xl font-bold text-red-400">{fmtMoney(-totalOutstanding)}</p>
+                </>
+              )}
             </div>
           </div>
           <div className="text-right">
-            <p className="text-xs text-gray-500">{customersWithUdhar} customer{customersWithUdhar !== 1 ? 's' : ''} with balance</p>
+            <p className="text-xs text-gray-500">{customersWithUdhar} customer{customersWithUdhar !== 1 ? 's' : ''} with udhar</p>
+            {customersWeOwe > 0 && (
+              <p className="text-xs text-gray-500">{customersWeOwe} customer{customersWeOwe !== 1 ? 's' : ''} we owe</p>
+            )}
           </div>
         </div>
       )}
@@ -404,47 +448,47 @@ export default function Customers() {
                   <div className="space-y-1 flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <p className="text-sm font-semibold text-white">{c.name}</p>
+                      {/* v0.34.0: balance badge — green udhar, red advance (we owe them).
+                          Previously negative balances showed nothing (hidden debt). */}
                       {(c.outstanding_balance || 0) > 0 && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-300 border border-emerald-700/50 font-bold whitespace-nowrap">
                           Udhar: {fmtMoney(c.outstanding_balance || 0)}
+                        </span>
+                      )}
+                      {(c.outstanding_balance || 0) < 0 && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900/50 text-red-300 border border-red-700/50 font-bold whitespace-nowrap">
+                          Dene hain: {fmtMoney(-(c.outstanding_balance || 0))}
                         </span>
                       )}
                     </div>
                     <p className="text-xs text-gray-400 flex items-center"><Phone size={10} className="mr-1" />{c.phone || '-'}</p>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {(c.outstanding_balance || 0) > 0 && c.id && (
-                      <>
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); handleOpenPaymentModal(c); }}
-                          className="text-emerald-400 hover:text-emerald-300 transition-colors p-1"
-                          title="Record Payment"
-                        >
-                          <Banknote size={14} />
-                        </button>
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); handleShowBalanceHistory(c); }}
-                          className="text-blue-400 hover:text-blue-300 transition-colors p-1"
-                          title="View Khata History"
-                        >
-                          <Wallet size={14} />
-                        </button>
-                      </>
+                    {/* v0.34.0: Record Payment — green icon when they owe us (udhar),
+                        red icon when we owe them (settle advance debt) */}
+                    {(c.outstanding_balance || 0) !== 0 && c.id && (
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); handleOpenPaymentModal(c); }}
+                        className={`${(c.outstanding_balance || 0) > 0 ? 'text-emerald-400 hover:text-emerald-300' : 'text-red-400 hover:text-red-300'} transition-colors p-1`}
+                        title={(c.outstanding_balance || 0) > 0 ? 'Record Payment (lena hai)' : 'Settle Debt (dena hai)'}
+                      >
+                        <Banknote size={14} />
+                      </button>
                     )}
                     {/* v0.29.0: Manual ledger entry buttons — always visible */}
                     {c.id && (
                       <>
                         <button 
-                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'opening_debit'); }}
+                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'opening_debit', (c.outstanding_balance || 0) < 0 ? 'advance' : 'udhaar'); }}
                           className="text-amber-400 hover:text-amber-300 transition-colors p-1"
-                          title="Add Opening Balance (purana udhar)"
+                          title="Add Opening Balance (purana udhar / advance)"
                         >
                           <BookOpen size={14} />
                         </button>
                         <button 
-                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'adjustment'); }}
+                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'adjustment', (c.outstanding_balance || 0) < 0 ? 'advance' : 'udhaar'); }}
                           className="text-violet-400 hover:text-violet-300 transition-colors p-1"
-                          title="Add Adjustment (discount/correction)"
+                          title="Add Adjustment (maal wapas / correction)"
                         >
                           <Sliders size={14} />
                         </button>
@@ -739,12 +783,18 @@ export default function Customers() {
         </div>
       )}
 
-      {/* v0.26.0: Payment Modal */}
+      {/* v0.34.0: Payment Modal — works both ways now.
+          Positive balance: customer pays us (green, existing flow).
+          Negative balance: we pay/settle the customer (red). The backend
+          `record_customer_payment` only handles positive balances, so settling
+          our debt to a customer goes through the ledger as a negative adjustment. */}
       {showPaymentModal && paymentCustomer && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-gray-800 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
             <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-slate-950/40">
-              <h3 className="text-lg font-bold text-white">Record Payment</h3>
+              <h3 className="text-lg font-bold text-white">
+                {(paymentCustomer.outstanding_balance || 0) > 0 ? 'Record Payment' : 'Settle Debt (Hum ko dena hai)'}
+              </h3>
               <button onClick={() => setShowPaymentModal(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
             </div>
             <div className="p-5 space-y-3">
@@ -753,9 +803,17 @@ export default function Customers() {
                 <p className="text-base font-semibold text-white">{paymentCustomer.name}</p>
                 <p className="text-xs text-gray-500">{paymentCustomer.phone || 'No phone'}</p>
               </div>
-              <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 flex justify-between items-center">
-                <span className="text-sm text-amber-300">Outstanding Balance</span>
-                <span className="text-lg font-bold text-amber-400">{fmtMoney(paymentCustomer.outstanding_balance || 0)}</span>
+              <div className={`rounded-lg p-3 flex justify-between items-center border ${
+                (paymentCustomer.outstanding_balance || 0) >= 0
+                  ? 'bg-amber-900/20 border-amber-700/50'
+                  : 'bg-red-900/20 border-red-700/50'
+              }`}>
+                <span className={`text-sm ${(paymentCustomer.outstanding_balance || 0) >= 0 ? 'text-amber-300' : 'text-red-300'}`}>
+                  {(paymentCustomer.outstanding_balance || 0) >= 0 ? 'Outstanding Balance' : 'Hum in ko dete hain'}
+                </span>
+                <span className={`text-lg font-bold ${(paymentCustomer.outstanding_balance || 0) >= 0 ? 'text-amber-400' : 'text-red-400'}`}>
+                  {fmtMoney(Math.abs(paymentCustomer.outstanding_balance || 0))}
+                </span>
               </div>
               <div>
                 <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Payment Amount</label>
@@ -768,7 +826,7 @@ export default function Customers() {
                   className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
                 />
                 <p className="text-[10px] text-gray-600 mt-1">
-                  New balance after payment: <span className="text-gray-400">{fmtMoney(Math.max(0, (paymentCustomer.outstanding_balance || 0) - paymentAmount))}</span>
+                  New balance after payment: <span className="text-gray-400">{fmtMoney((paymentCustomer.outstanding_balance || 0) + ((paymentCustomer.outstanding_balance || 0) >= 0 ? -paymentAmount : paymentAmount))}</span>
                 </p>
               </div>
               <div>
@@ -888,29 +946,59 @@ export default function Customers() {
                 <span className="text-sm text-amber-300">Current Outstanding</span>
                 <span className="text-lg font-bold text-amber-400">{fmtMoney(paymentCustomer.outstanding_balance || 0)}</span>
               </div>
+              {/* v0.34.0: Direction chooser — the core fix. Which way does the money go?
+                  Sign is derived from this, user never types a minus. */}
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Kis taraf ka hisaab hai?</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLedgerDirection('udhaar')}
+                    className={`p-3 rounded-lg border text-left transition-all ${
+                      ledgerDirection === 'udhaar'
+                        ? 'bg-emerald-900/30 border-emerald-600/60'
+                        : 'bg-slate-950 border-gray-800 hover:border-gray-600'
+                    }`}>
+                    <p className={`text-sm font-bold ${ledgerDirection === 'udhaar' ? 'text-emerald-300' : 'text-gray-300'}`}>Customer hum se deta hai</p>
+                    <p className="text-[10px] text-gray-500">Udhaar / purana udhaar — HO ko lena hai</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLedgerDirection('advance')}
+                    className={`rounded-lg border text-left transition-all p-3 ${
+                      ledgerDirection === 'advance'
+                        ? 'bg-red-900/30 border-red-600/60'
+                        : 'bg-slate-950 border-gray-800 hover:border-gray-600'
+                    }`}>
+                    <p className={`text-sm font-bold ${ledgerDirection === 'advance' ? 'text-red-300' : 'text-gray-300'}`}>Hum customer ko dete hain</p>
+                    <p className="text-[10px] text-gray-500">Advance payment / maal wapas — HO ko dena hai</p>
+                  </button>
+                </div>
+              </div>
               {ledgerEntryType === 'opening_debit' && (
                 <p className="text-xs text-gray-400 bg-slate-950/50 border border-gray-800 rounded p-2">
-                  Use this to record old/purana udhar that wasn't tracked before. Increases customer's outstanding balance.
+                  Use this to record old/purana hisaab that wasn't tracked before.
                 </p>
               )}
               {ledgerEntryType === 'adjustment' && (
                 <p className="text-xs text-gray-400 bg-slate-950/50 border border-gray-800 rounded p-2">
-                  Use this for corrections. Positive amount = customer owes more. Negative amount = customer owes less (discount/write-off).
+                  For corrections, maal wapas, or error fixes. Direction above decides the sign.
                 </p>
               )}
               <div>
                 <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">
-                  Amount {ledgerEntryType === 'adjustment' && '(use minus for discount)'}
+                  Amount
                 </label>
                 <input
                   type="number"
                   step={0.01}
+                  min={0}
                   value={ledgerEntryAmount}
                   onChange={e => setLedgerEntryAmount(Number(e.target.value))}
                   className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
                 />
                 <p className="text-[10px] text-gray-600 mt-1">
-                  New balance: <span className="text-gray-400">{fmtMoney((paymentCustomer.outstanding_balance || 0) + ledgerEntryAmount)}</span>
+                  New balance: <span className="text-gray-400">{fmtMoney((paymentCustomer.outstanding_balance || 0) + (ledgerDirection === 'udhaar' ? Math.abs(ledgerEntryAmount) : -Math.abs(ledgerEntryAmount)))}</span>
                 </p>
               </div>
               <div>
