@@ -73,7 +73,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-cli | Out-Null
-          Copy-Item src-tauri/target/release/acollectionho.exe dist-cli/acollectionho-v${{ github.ref_name }}.exe -ErrorAction Stop
+          Copy-Item src-tauri/target/release/acollectionho.exe dist-cli/acollectionho-${{ github.ref_name }}.exe -ErrorAction Stop
           Get-ChildItem dist-cli
 
       - name: Upload MSI Installer
