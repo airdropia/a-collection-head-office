@@ -112,12 +112,21 @@ function die(msg: string): never {
 // Customer outstanding, computed from ledger (source of truth).
 // entry_type signs: payment -> -amount, opening_debit -> +amount,
 // adjustment -> +amount (amount stored signed, may be negative).
+// v0.35.0: CANONICAL customer outstanding — mirrors the GUI app's khata
+// (get_customer_balance_history + every write path) EXACTLY:
+//   SUM(sales.balance WHERE NOT reversed)   <- udhar sale debts (v0.26+)
+//   - SUM(payments)  [+ opening_debit] [+ adjustment (signed)]
+// entry_type may be NULL on pre-v0.29 rows — treat NULL as 'payment'.
+// customers.outstanding_balance is a maintained CACHE of this value.
 const CUSTOMER_OUTSTANDING_SQL = `
-  COALESCE(SUM(CASE entry_type
-    WHEN 'payment'       THEN -amount
-    WHEN 'opening_debit' THEN  amount
-    WHEN 'adjustment'    THEN  amount
-    ELSE 0 END), 0.0)`;
+  COALESCE((SELECT SUM(s.balance) FROM sales s
+            WHERE s.customer_id = c.id AND COALESCE(s.reversed, 0) = 0), 0.0)
+  - COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'payment'), 0.0)
+  + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'opening_debit'), 0.0)
+  + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)`;
 
 // Agent outstanding, mirrors get_agent_summary() in src-tauri/src/agents/mod.rs:
 //   outstanding = stock_sent.value - cash_received - stock_returned.value
@@ -150,8 +159,7 @@ function customersList() {
            c.outstanding_balance AS stored_balance,
            (${CUSTOMER_OUTSTANDING_SQL}) AS computed_balance
     FROM customers c
-    LEFT JOIN customer_payments p ON p.customer_id = c.id
-    GROUP BY c.id ORDER BY computed_balance DESC`).all() as any[];
+    ORDER BY computed_balance DESC`).all() as any[];
 
   out(rows.map(r => ({
     id: r.id, name: r.name, phone: maskPhone(r.phone), segment: r.segment,
@@ -173,9 +181,7 @@ function customersNet() {
   const rows = db.query(`
     SELECT c.id, c.name,
            (${CUSTOMER_OUTSTANDING_SQL}) AS bal
-    FROM customers c
-    LEFT JOIN customer_payments p ON p.customer_id = c.id
-    GROUP BY c.id`).all() as any[];
+    FROM customers c`).all() as any[];
 
   const receivable = rows.filter(r => r.bal > 0.004).sort((a, b) => b.bal - a.bal);
   const payable = rows.filter(r => r.bal < -0.004);
@@ -206,18 +212,33 @@ function customersKhata(key: string) {
   if (row.length > 1) die(`ambiguous match for "${key}" — ${row.map(r => `#${r.id} ${r.name}${r.phone ? ` (${maskPhone(r.phone)})` : ""}`).join(" | ")} — use id`);
   const c = row[0];
 
-  const entries = db.query(`
-    SELECT id, amount, entry_type, payment_date, notes, sale_id
+  // v0.35.0: full khata = sales (udhar balances) + payments ledger, merged by
+  // date — mirrors the GUI app's get_customer_balance_history exactly.
+  const saleRows = db.query(`
+    SELECT s.id, s.sale_date AS date, s.balance AS effect, s.qty, s.total_sale_amount, p.name AS product
+    FROM sales s LEFT JOIN products p ON p.id = s.product_id
+    WHERE s.customer_id = ? AND COALESCE(s.reversed, 0) = 0
+    ORDER BY s.sale_date, s.id`).all(c.id) as any[];
+  const payRows = db.query(`
+    SELECT id, amount, COALESCE(entry_type, 'payment') AS entry_type, payment_date AS date, notes, sale_id
     FROM customer_payments WHERE customer_id = ? ORDER BY payment_date, id`).all(c.id) as any[];
 
+  const combined = [
+    ...saleRows.map(s => ({ id: s.id, date: s.date, type: "sale",
+        amount: s.total_sale_amount, effect: s.effect,
+        notes: `${s.product ?? "?"} x${s.qty} (udhar balance)`, sale_id: null })),
+    ...payRows.map(e => ({ id: e.id, date: e.date, type: e.entry_type,
+        amount: e.amount,
+        effect: e.entry_type === "payment" ? -e.amount
+              : e.entry_type === "opening_debit" ? e.amount
+              : e.entry_type === "adjustment" ? e.amount : 0,
+        notes: e.notes ?? "", sale_id: e.sale_id })),
+  ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.type === "sale" ? -1 : 1) - (b.type === "sale" ? -1 : 1)));
+
   let running = 0;
-  const ledger = entries.map(e => {
-    const delta = e.entry_type === "payment" ? -e.amount
-      : e.entry_type === "opening_debit" ? e.amount
-      : e.entry_type === "adjustment" ? e.amount : 0;
-    running += delta;
-    return { id: e.id, date: e.payment_date, type: e.entry_type, amount: e.amount,
-             effect: delta, balance_after: running, notes: e.notes ?? "", sale_id: e.sale_id };
+  const ledger = combined.map(e => {
+    running += e.effect;
+    return { ...e, balance_after: running };
   });
 
   out({ customer: { id: c.id, name: c.name, phone: maskPhone(c.phone), location: c.location,
@@ -339,12 +360,12 @@ function dbHealth() {
   const count = (t: string): number => (db.query(`SELECT COUNT(*) AS c FROM ${t}`).get() as any).c;
 
   const custDrift = db.query(`
-    SELECT c.id, c.name, c.outstanding_balance AS stored,
-           (${CUSTOMER_OUTSTANDING_SQL}) AS computed
-    FROM customers c
-    LEFT JOIN customer_payments p ON p.customer_id = c.id
-    GROUP BY c.id
-    HAVING ABS(computed - COALESCE(c.outstanding_balance, 0)) > 0.004`).all() as any[];
+    SELECT * FROM (
+      SELECT c.id, c.name, c.outstanding_balance AS stored,
+             (${CUSTOMER_OUTSTANDING_SQL}) AS computed
+      FROM customers c
+    )
+    WHERE ABS(computed - COALESCE(stored, 0)) > 0.004`).all() as any[];
 
   const orphanPayments = count_q(`SELECT COUNT(*) AS c FROM customer_payments p LEFT JOIN customers c ON c.id = p.customer_id WHERE c.id IS NULL`);
   const orphanLedger = count_q(`SELECT COUNT(*) AS c FROM agent_ledger_entries e LEFT JOIN agents a ON a.id = e.agent_id WHERE a.id IS NULL`);

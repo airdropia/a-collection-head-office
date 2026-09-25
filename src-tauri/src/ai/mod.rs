@@ -108,7 +108,7 @@ pub fn build_business_context(conn: &Connection) -> Result<String, String> {
     let prod_count: i64 = conn.query_row("SELECT COUNT(*) FROM products WHERE status='active'", [], |r| r.get(0)).unwrap_or(0);
     let cust_count: i64 = conn.query_row("SELECT COUNT(*) FROM customers", [], |r| r.get(0)).unwrap_or(0);
     let order_count: i64 = conn.query_row("SELECT COUNT(*) FROM orders", [], |r| r.get(0)).unwrap_or(0);
-    let low_stock: i64 = conn.query_row("SELECT COUNT(*) FROM products WHERE stock_quantity <= 5 AND status='active'", [], |r| r.get(0)).unwrap_or(0);
+    let low_stock: i64 = conn.query_row("SELECT COUNT(*) FROM products WHERE (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= 5 AND COALESCE(profit_status, 'in_head_office') != 'sold_out' AND status='active'", [], |r| r.get(0)).unwrap_or(0);
     let dead_stock: i64 = conn.query_row("SELECT COUNT(*) FROM products WHERE stock_quantity = 0 AND status='active'", [], |r| r.get(0)).unwrap_or(0);
     let total_sales: f64 = conn.query_row("SELECT COALESCE(SUM(total_amount), 0.0) FROM orders", [], |r| r.get(0)).unwrap_or(0.0);
     let total_profit: f64 = conn.query_row("SELECT COALESCE(SUM(profit), 0.0) FROM orders", [], |r| r.get(0)).unwrap_or(0.0);

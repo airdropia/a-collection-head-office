@@ -65,6 +65,17 @@ jobs:
       - name: Build Tauri app (Windows)
         run: npx tauri build --bundles nsis,msi
 
+      # v0.35.0: the write-CLI binary builds as a second [[bin]] target of the
+      # same crate — `npx tauri build` compiles it via `cargo build --release`
+      # alongside the GUI app. Attach the standalone exe to the release so
+      # pi-agent / owner can download it without building locally.
+      - name: Collect write-CLI binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-cli | Out-Null
+          Copy-Item src-tauri/target/release/acollectionho.exe dist-cli/acollectionho-v${{ github.ref_name }}.exe -ErrorAction Stop
+          Get-ChildItem dist-cli
+
       - name: Upload MSI Installer
         uses: actions/upload-artifact@v4
         with:
@@ -77,6 +88,12 @@ jobs:
           name: windows-nsis
           path: src-tauri/target/release/bundle/nsis/*.exe
 
+      - name: Upload write-CLI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-write-cli
+          path: dist-cli/*.exe
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -84,4 +101,5 @@ jobs:
           files: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
+            dist-cli/*.exe
           generate_release_notes: true

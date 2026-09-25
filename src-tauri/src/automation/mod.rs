@@ -180,7 +180,8 @@ fn compile_weekly_summary(conn: &Connection) -> Result<String, String> {
     ).map_err(|e| e.to_string())?;
 
     let low_stock_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM products WHERE stock_quantity <= 5 AND status = 'active'",
+        // v0.35.0: split-columns rule (HO + agents stock), legacy fallback kept
+        "SELECT COUNT(*) FROM products WHERE (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= 5 AND COALESCE(profit_status, 'in_head_office') != 'sold_out' AND status = 'active'",
         [],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;

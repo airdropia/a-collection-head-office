@@ -59,14 +59,26 @@ Global flags:
 - Outstanding values **ledger se compute** hoti hain (source of truth) —
   `db health` stored columns se drift bhi check karta hai.
 
-## Phase B (writes) — roadmap
+## Phase B (v0.35.0) — writes via acollectionho.exe
 
-Writes (`add-udhar`, `return-cash`, etc.) **is CLI mein NAHI hain** jaan boojh
-kar. Business rules (sign conventions, validations, side effects) Rust command
-layer mein hain — duplicate karne se ledger corrupt hota hai. Phase B mein
-`acollectionho.exe` (Rust, CI-built, releases se download) aayega jo **wahi
-command layer** use karta hai. Tab tak koi bhi write sirf GUI se ya owner ke
-through.
+Writes ka sanctioned path ab **`acollectionho.exe`** hai (Rust, isi repo ke
+CI release se download hota hai — releases page dekho). Yeh binary **wahi
+business logic** use karta hai jo GUI app use karta hai (extracted *_impl
+functions) — koi duplication nahi, sign conventions guaranteed.
+
+```text
+acollectionho pay-customer <customer_id> <amount> [--notes N] [--sale ID]
+acollectionho manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]
+acollectionho agent-cash <agent_id|code> <amount> [--notes N]
+acollectionho customer-add --name N [--phone P] [--location L]
+acollectionho customer-edit <id> [--name N] [--phone P] [--location L]
+acollectionho db-drift      # stored vs canonical ledger report
+acollectionho db-fix        # outstanding caches rewrite (ledger untouched)
+```
+
+Safety: GUI app band rakhein during writes. `db health` (yeh CLI) ab
+**canonical** drift check karta hai — v0.35.0 se app startup pe bhi auto-heal
+chalta hai.
 
 ## Sign conventions (CRITICAL — change mat karna)
 
@@ -76,5 +88,9 @@ gayi hain:
 - Agent outstanding = `stock_sent.value - cash_received - stock_returned.value
   + SUM(-amount WHERE balance_adjustment)` (adjustment DB mein negated hota hai)
 - `sale_reported` = sirf stock units, money outstanding pe asar nahi
-- Customer: `payment → -amount`, `opening_debit → +amount`,
-  `adjustment → +amount` (stored signed)
+- **Customer (v0.35.0 canonical)** = `SUM(sales.balance WHERE reversed=0)`
+  (udhar sale debts) `- SUM(payments)` `+ SUM(opening_debit)` `+
+  SUM(adjustment signed)`. Pre-v0.29 payment rows (entry_type NULL) = payment.
+  `customers.outstanding_balance` = is value ka **cache** — v0.35.0 se app
+  startup pe auto-heal hota hai. (Purana payments-only formula ADHOORA tha —
+  v0.26.x era "drift" false-positive isi wajah se tha.)

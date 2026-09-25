@@ -24,6 +24,24 @@ pub fn init_db<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
     )?;
 
     run_migrations(&mut conn)?;
+
+    // v0.35.0 (Phase B): auto-heal — recompute the customers.outstanding_balance
+    // cache from the canonical ledger aggregate at every startup. The ledger
+    // tables are NEVER touched; only drifted cache rows are rewritten.
+    // Historical write paths (v0.26.x era edits) could leave the cache stale.
+    match crate::customers::recompute_all_customer_balances(&mut conn) {
+        Ok(drifts) if !drifts.is_empty() => {
+            for d in &drifts {
+                eprintln!(
+                    "[auto-heal] customer #{} ({}) outstanding_balance {} -> {}",
+                    d.customer_id, d.name, d.stored, d.computed
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[auto-heal] recompute failed (non-fatal): {}", e),
+    }
+
     Ok(conn)
 }
 

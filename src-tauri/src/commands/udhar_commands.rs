@@ -30,6 +30,9 @@ use tauri::State;
 /// Reduces customer.outstanding_balance by the payment amount and inserts
 /// a row in customer_payments for audit/history.
 /// Optionally link the payment to a specific sale_id.
+///
+/// v0.35.0: business logic extracted to customers::record_payment_impl —
+/// shared verbatim with the acollectionho write-CLI (Phase B).
 #[tauri::command]
 pub async fn record_customer_payment(
     state: State<'_, DbState>,
@@ -38,65 +41,8 @@ pub async fn record_customer_payment(
     notes: Option<String>,
     sale_id: Option<i64>,
 ) -> Result<(), String> {
-    if amount <= 0.0 {
-        return Err("Payment amount must be positive.".to_string());
-    }
     let conn = state.0.lock().await;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
-
-    // Check customer exists and has enough balance
-    let current_balance: f64 = conn.query_row(
-        "SELECT COALESCE(outstanding_balance, 0.0) FROM customers WHERE id = ?1",
-        rusqlite::params![customer_id],
-        |r| r.get(0),
-    ).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        format!("Customer not found: {}", e)
-    })?;
-
-    if amount > current_balance {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(format!(
-            "Payment (Rs. {:.0}) exceeds outstanding balance (Rs. {:.0}).",
-            amount, current_balance
-        ));
-    }
-
-    // Insert payment record
-    if let Err(e) = conn.execute(
-        "INSERT INTO customer_payments (customer_id, amount, payment_date, notes, sale_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            customer_id,
-            amount,
-            &now,
-            notes.as_deref().unwrap_or(""),
-            sale_id,
-            &now,
-            &now,
-        ],
-    ) {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to insert payment: {}", e));
-    }
-
-    // Reduce customer's outstanding balance
-    if let Err(e) = conn.execute(
-        "UPDATE customers SET outstanding_balance = outstanding_balance - ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![amount, &now, customer_id],
-    ) {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to update balance: {}", e));
-    }
-
-    conn.execute("COMMIT", []).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        e.to_string()
-    })?;
-
-    Ok(())
+    customers::record_payment_impl(&conn, customer_id, amount, notes.as_deref(), sale_id)
 }
 
 /// Get a customer's full balance history (sales + payments) in chronological order.
@@ -241,6 +187,9 @@ pub async fn get_customer_balance_history(
 ///   - (customer owes less, e.g., discount)
 ///
 /// `entry_date` is optional — defaults to now (UTC ISO 8601).
+///
+/// v0.35.0: business logic extracted to customers::add_manual_entry_impl —
+/// shared verbatim with the acollectionho write-CLI (Phase B).
 #[tauri::command]
 pub async fn add_customer_ledger_entry(
     state: State<'_, DbState>,
@@ -267,58 +216,14 @@ pub async fn add_customer_ledger_entry(
     }
 
     let conn = state.0.lock().await;
-    let now = chrono::Utc::now().to_rfc3339();
-    let date = entry_date.unwrap_or_else(|| now.clone());
-
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
-
-    // Verify customer exists
-    let _: i64 = conn.query_row(
-        "SELECT id FROM customers WHERE id = ?1",
-        rusqlite::params![customer_id],
-        |r| r.get(0),
-    ).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        format!("Customer not found: {}", e)
-    })?;
-
-    // Insert ledger entry
-    let res = conn.execute(
-        "INSERT INTO customer_payments (customer_id, amount, payment_date, notes, sale_id, entry_type, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
-        rusqlite::params![
-            customer_id,
-            amount,
-            &date,
-            notes.as_deref().unwrap_or(""),
-            &entry_type,
-            &now,
-            &now,
-        ],
-    );
-    if let Err(e) = res {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to insert ledger entry: {}", e));
-    }
-    let entry_id = conn.last_insert_rowid();
-
-    // Update customer's outstanding_balance:
-    //   opening_debit → balance += amount (customer owes more)
-    //   adjustment    → balance += amount (signed; negative reduces balance)
-    if let Err(e) = conn.execute(
-        "UPDATE customers SET outstanding_balance = outstanding_balance + ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![amount, &now, customer_id],
-    ) {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to update balance: {}", e));
-    }
-
-    conn.execute("COMMIT", []).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        e.to_string()
-    })?;
-
-    Ok(entry_id)
+    customers::add_manual_entry_impl(
+        &conn,
+        customer_id,
+        &entry_type,
+        amount,
+        notes.as_deref(),
+        entry_date.as_deref(),
+    )
 }
 
 /// Update an existing manual ledger entry (opening_debit or adjustment).

@@ -223,3 +223,246 @@ pub fn get_customer_purchase_history(conn: &Connection, customer_id: i64) -> Res
 
     Ok(history)
 }
+
+// ============================================================
+// v0.35.0 — Phase B: canonical balance recompute (auto-heal)
+// ============================================================
+//
+// The authoritative customer outstanding is the aggregate of the FULL
+// khata (mirrors get_customer_balance_history exactly):
+//
+//   computed = SUM(sales.balance WHERE reversed = 0)      (udhar sale debts)
+//            - SUM(payments.amount)                       (entry_type 'payment' or NULL — legacy rows)
+//            + SUM(opening_debit.amount)                  (always positive in DB)
+//            + SUM(adjustment.amount)                     (signed in DB)
+//
+// The customers.outstanding_balance column is a maintained CACHE of this
+// value, written by every write path (record_sale / undo_sale /
+// record_customer_payment / add_customer_ledger_entry). Historical code
+// paths could drift it; the recompute repairs the cache. It never touches
+// the ledger tables — the ledger is the source of truth.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BalanceDrift {
+    pub customer_id: i64,
+    pub name: String,
+    pub stored: f64,
+    pub computed: f64,
+    pub fixed: bool,
+}
+
+pub const CANONICAL_OUTSTANDING_SQL: &str = "
+  COALESCE((SELECT SUM(s.balance) FROM sales s
+            WHERE s.customer_id = c.id AND COALESCE(s.reversed, 0) = 0), 0.0)
+  - COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'payment'), 0.0)
+  + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'opening_debit'), 0.0)
+  + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)";
+
+/// Read-only: report every customer whose stored cache differs from the
+/// computed canonical balance (|drift| > 0.004).
+pub fn get_customer_balance_drift(conn: &Connection) -> Result<Vec<BalanceDrift>, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT c.id, c.name, COALESCE(c.outstanding_balance, 0.0),
+                ({}) AS computed
+         FROM customers c",
+        CANONICAL_OUTSTANDING_SQL
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        let stored: f64 = row.get(2)?;
+        let computed: f64 = row.get(3)?;
+        Ok(BalanceDrift {
+            customer_id: row.get(0)?,
+            name: row.get(1)?,
+            stored,
+            computed,
+            fixed: false,
+        })
+    })?;
+    let mut drifts = Vec::new();
+    for r in rows {
+        let d = r?;
+        if (d.stored - d.computed).abs() > 0.004 {
+            drifts.push(d);
+        }
+    }
+    Ok(drifts)
+}
+
+/// Write: recompute every customer's outstanding_balance cache from the
+/// canonical ledger aggregate and rewrite drifted rows. Returns the list of
+/// rows that were out of sync (with `fixed = true` on the ones rewritten).
+/// Ledger tables are NEVER modified by this function.
+pub fn recompute_all_customer_balances(
+    conn: &Connection,
+) -> Result<Vec<BalanceDrift>, rusqlite::Error> {
+    let drifts = get_customer_balance_drift(conn)?;
+    if drifts.is_empty() {
+        return Ok(drifts);
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    for d in &drifts {
+        conn.execute(
+            "UPDATE customers SET outstanding_balance = ?1, updated_at = ?2 WHERE id = ?3",
+            params![d.computed, &now, d.customer_id],
+        )?;
+    }
+    Ok(drifts
+        .into_iter()
+        .map(|mut d| {
+            d.fixed = true;
+            d
+        })
+        .collect())
+}
+
+// ============================================================
+// v0.35.0 — Phase B: extracted write-path impls (shared by the Tauri
+// command layer AND the acollectionho write-CLI — single source of truth
+// for business rules + sign conventions).
+// ============================================================
+
+/// Record a customer payment (reduces outstanding_balance).
+/// Extracted verbatim from the record_customer_payment Tauri command.
+pub fn record_payment_impl(
+    conn: &Connection,
+    customer_id: i64,
+    amount: f64,
+    notes: Option<&str>,
+    sale_id: Option<i64>,
+) -> Result<(), String> {
+    if amount <= 0.0 {
+        return Err("Payment amount must be positive.".to_string());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+
+    let current_balance: f64 = conn.query_row(
+        "SELECT COALESCE(outstanding_balance, 0.0) FROM customers WHERE id = ?1",
+        params![customer_id],
+        |r| r.get(0),
+    ).map_err(|e| {
+        let _ = conn.execute("ROLLBACK", []);
+        format!("Customer not found: {}", e)
+    })?;
+
+    if amount > current_balance {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!(
+            "Payment (Rs. {:.0}) exceeds outstanding balance (Rs. {:.0}).",
+            amount, current_balance
+        ));
+    }
+
+    if let Err(e) = conn.execute(
+        "INSERT INTO customer_payments (customer_id, amount, payment_date, notes, sale_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            customer_id,
+            amount,
+            &now,
+            notes.unwrap_or(""),
+            sale_id,
+            &now,
+            &now,
+        ],
+    ) {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to insert payment: {}", e));
+    }
+
+    if let Err(e) = conn.execute(
+        "UPDATE customers SET outstanding_balance = outstanding_balance - ?1, updated_at = ?2 WHERE id = ?3",
+        params![amount, &now, customer_id],
+    ) {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to update balance: {}", e));
+    }
+
+    conn.execute("COMMIT", []).map_err(|e| {
+        let _ = conn.execute("ROLLBACK", []);
+        e.to_string()
+    })?;
+
+    Ok(())
+}
+
+/// Add a manual ledger entry (opening_debit | adjustment).
+/// Extracted verbatim from the add_customer_ledger_entry Tauri command.
+/// Sign convention: opening_debit amount must be > 0 (adds to balance);
+/// adjustment amount is signed (negative reduces balance — e.g. advance).
+pub fn add_manual_entry_impl(
+    conn: &Connection,
+    customer_id: i64,
+    entry_type: &str,
+    amount: f64,
+    notes: Option<&str>,
+    date: Option<&str>,
+) -> Result<i64, String> {
+    if entry_type != "opening_debit" && entry_type != "adjustment" {
+        return Err(format!(
+            "Invalid entry_type '{}'. Must be 'opening_debit' or 'adjustment'.",
+            entry_type
+        ));
+    }
+    if entry_type == "opening_debit" && amount <= 0.0 {
+        return Err("Opening debit amount must be positive.".to_string());
+    }
+    // adjustment can be zero — no-op, but rejected for consistency with GUI
+    if entry_type == "adjustment" && amount == 0.0 {
+        return Err("Adjustment amount cannot be zero.".to_string());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry_date = date.unwrap_or(&now);
+
+    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+
+    if conn
+        .query_row(
+            "SELECT id FROM customers WHERE id = ?1",
+            params![customer_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .is_err()
+    {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Customer not found: {}", customer_id));
+    }
+
+    let res = conn.execute(
+        "INSERT INTO customer_payments (customer_id, amount, payment_date, notes, sale_id, entry_type, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
+        params![
+            customer_id,
+            amount,
+            entry_date,
+            notes.unwrap_or(""),
+            entry_type,
+            &now,
+            &now,
+        ],
+    );
+    if let Err(e) = res {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to insert ledger entry: {}", e));
+    }
+    let entry_id = conn.last_insert_rowid();
+
+    if let Err(e) = conn.execute(
+        "UPDATE customers SET outstanding_balance = outstanding_balance + ?1, updated_at = ?2 WHERE id = ?3",
+        params![amount, &now, customer_id],
+    ) {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to update balance: {}", e));
+    }
+
+    conn.execute("COMMIT", []).map_err(|e| {
+        let _ = conn.execute("ROLLBACK", []);
+        e.to_string()
+    })?;
+
+    Ok(entry_id)
+}

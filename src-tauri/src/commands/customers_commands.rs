@@ -59,3 +59,14 @@ pub async fn get_customer_history(state: State<'_, DbState>, customer_id: i64) -
     let conn = state.0.lock().await;
     customers::get_customer_purchase_history(&conn, customer_id).map_err(|e| e.to_string())
 }
+
+/// v0.35.0 (Phase B): recompute every customer's outstanding_balance cache
+/// from the canonical ledger aggregate. Ledger tables are never modified.
+/// Also runs automatically at startup (auto-heal in database::init_db).
+#[tauri::command]
+pub async fn recompute_customer_balances(
+    state: State<'_, DbState>,
+) -> Result<Vec<customers::BalanceDrift>, String> {
+    let conn = state.0.lock().await;
+    customers::recompute_all_customer_balances(&conn).map_err(|e| e.to_string())
+}

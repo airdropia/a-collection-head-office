@@ -69,10 +69,16 @@ pub fn get_inventory_summary(conn: &Connection) -> Result<InventorySummary, rusq
 }
 
 pub fn get_low_stock_items(conn: &Connection, threshold: i64) -> Result<Vec<LowStockItem>, rusqlite::Error> {
+    // v0.35.0: aligned to the v0.27+ split columns (qty_in_head_office +
+    // qty_with_agents) — the legacy stock_quantity-only rule undercounted
+    // stock that had moved to agents. Fallbacks keep pre-v0.27 rows working.
+    // Excludes sold-out products. Threshold semantics unchanged.
     let mut stmt = conn.prepare(
         "SELECT id, sku, name, stock_quantity, category 
          FROM products 
-         WHERE stock_quantity <= ?1 AND status = 'active'
+         WHERE (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= ?1 
+           AND COALESCE(profit_status, 'in_head_office') != 'sold_out' 
+           AND status = 'active'
          ORDER BY stock_quantity ASC"
     )?;
 
