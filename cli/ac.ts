@@ -203,7 +203,7 @@ function customersKhata(key: string) {
     ? db.query(`SELECT id, name, phone, location, notes, segment, is_active FROM customers WHERE id = ? LIMIT 2`).all(Number(key))
     : db.query(`SELECT id, name, phone, location, notes, segment, is_active FROM customers WHERE LOWER(name) LIKE '%' || LOWER(?) || '%' ORDER BY id LIMIT 2`).all(key)) as any[];
   if (row.length === 0) die(`customer not found: ${key}`);
-  if (row.length > 1) die(`ambiguous match for "${key}": ids ${row.map(r => r.id).join(", ")} — use id`);
+  if (row.length > 1) die(`ambiguous match for "${key}" — ${row.map(r => `#${r.id} ${r.name}${r.phone ? ` (${maskPhone(r.phone)})` : ""}`).join(" | ")} — use id`);
   const c = row[0];
 
   const entries = db.query(`
@@ -263,7 +263,7 @@ function agentsLedger(key: string) {
     ? db.query(`SELECT id, agent_code, name FROM agents WHERE id = ? LIMIT 2`).all(Number(key))
     : db.query(`SELECT id, agent_code, name FROM agents WHERE LOWER(agent_code) = LOWER(?) OR LOWER(name) LIKE '%' || LOWER(?) || '%' ORDER BY id LIMIT 2`).all(key, key)) as any[];
   if (rows.length === 0) die(`agent not found: ${key}`);
-  if (rows.length > 1) die(`ambiguous match for "${key}": ids ${rows.map(r => r.id).join(", ")} — use id`);
+  if (rows.length > 1) die(`ambiguous match for "${key}" — ${rows.map(r => `#${r.id} ${r.name} [${r.agent_code}]`).join(" | ")} — use id or code`);
   const a = rows[0];
 
   const entries = db.query(`

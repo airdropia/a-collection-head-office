@@ -34,6 +34,16 @@ No Node.js, no Python, no Rust needed. Only Bun.
 | `dashboard` | one-screen snapshot (JSON mode recommended) |
 | `version` | CLI phase + repo app version + DB path |
 
+**Rules (agent ops ke liye):**
+
+- Low-stock rule = `(qty_in_head_office + qty_with_agents) <= 2` AND `profit_status != 'sold_out'`
+  (v0.27+ split columns — app ke legacy `stock_quantity`-based rule se different,
+  jaan boojh kar; v0.35.0 mein app align hoga)
+- Agent codes real DB mein `AGT-<timestamp>` format mein hain (jaise `AGT-1783416246276650400`)
+  — mock docs ids (`AG-001`) real DB mein nahi milte
+- `customers khata <name>` ambiguous ho sakta hai (same naam ke customers) —
+  error ab id + naam + masked phone dikhata hai
+
 Global flags:
 
 - `--json` — machine-readable output (agents ke liye recommended)
