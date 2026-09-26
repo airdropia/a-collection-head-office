@@ -49,48 +49,6 @@ export interface Customer {
   segment?: string;
 }
 
-// ============================================================
-// v0.11.0 — Agents (replaces Locations as primary stock-movement entity)
-// ============================================================
-
-export interface Agent {
-  id?: number;
-  agent_code: string;
-  name: string;
-  phone?: string;
-  city?: string;
-  area?: string;
-  address_notes?: string;
-  notes?: string;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AgentSummary {
-  agent: Agent;
-  current_stock_units: number;
-  current_stock_value: number;
-  total_cash_received: number;
-  outstanding_balance: number;
-  last_settlement_at?: string | null;
-}
-
-export interface AgentLedgerEntry {
-  id?: number;
-  agent_id: number;
-  product_id?: number | null;
-  entry_type: string;  // stock_sent | stock_returned | sale_reported | cash_received | balance_adjustment
-  qty: number;
-  unit_price: number;
-  amount: number;
-  reference_code?: string;
-  notes?: string;
-  entry_date: string;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface OrderItemInput {
   product_id: number;
   quantity: number;

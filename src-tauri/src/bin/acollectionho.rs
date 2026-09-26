@@ -1,6 +1,6 @@
 //! acollectionho — A Collection Head Office write-CLI (Phase B, v0.35.0)
 //!
-//! Sanctioned WRITE path for agent operations. Reuses the EXACT business
+//! Sanctioned WRITE path for head-office operations. Reuses the EXACT business
 //! logic from the Tauri app's command layer (extracted *_impl functions +
 //! plain module functions) — single source of truth for sign conventions,
 //! validations, and side effects. No logic is duplicated here.
@@ -16,7 +16,6 @@
 //! Usage:
 //!   acollectionho pay-customer <customer_id> <amount> [--notes N] [--sale ID]
 //!   acollectionho manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]
-//!   acollectionho agent-cash <agent_id|code> <amount> [--notes N]
 //!   acollectionho customer-add --name N [--phone P] [--location L] [--notes N]
 //!   acollectionho customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]
 //!   acollectionho db-drift          (read-only drift report)
@@ -25,7 +24,7 @@
 //!
 //! Exit codes: 0 ok, 1 error, 2 usage.
 
-use a_collection_head_office_lib::{customers, database, agents, utils};
+use a_collection_head_office_lib::{customers, database, utils};
 use rusqlite::Connection;
 use std::process::ExitCode;
 
@@ -44,7 +43,6 @@ fn print_usage() {
 Writes (reuse the GUI app's exact business logic):\n\
   pay-customer <customer_id> <amount> [--notes N] [--sale ID]\n\
   manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]\n\
-  agent-cash <agent_id|code> <amount> [--notes N]\n\
   customer-add --name N [--phone P] [--location L] [--notes N]\n\
   customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]\n\
 \n\
@@ -57,7 +55,6 @@ Balance heal (v0.35.0):\n\
 Notes:\n\
   - Customer amounts follow khata sign conventions: payment reduces balance;\n\
     opening_debit must be positive; adjustment is signed (negative = advance).\n\
-  - Agent cash: ledger-only entry (agent outstanding is fully computed).\n\
   - Best practice: GUI app band rakhein during writes.",
         VERSION
     );
@@ -128,56 +125,6 @@ fn open_db() -> Connection {
     conn
 }
 
-fn resolve_agent(conn: &Connection, key: &str) -> i64 {
-    if let Ok(id) = key.parse::<i64>() {
-        let exists: Option<i64> = conn
-            .query_row("SELECT id FROM agents WHERE id = ?1", [id], |r| r.get(0))
-            .ok();
-        if exists.is_some() {
-            return id;
-        }
-    }
-    // try agent_code, then name
-    let by_code: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM agents WHERE LOWER(agent_code) = LOWER(?1)",
-            [key],
-            |r| r.get(0),
-        )
-        .ok();
-    if let Some(id) = by_code {
-        return id;
-    }
-    let matches: Vec<(i64, String)> = {
-        let mut stmt = conn
-            .prepare("SELECT id, name FROM agents WHERE LOWER(name) LIKE '%' || LOWER(?1) || '%'")
-            .expect("agent query");
-        let rows = stmt
-            .query_map([key], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .expect("agent query")
-            .filter_map(|r| r.ok())
-            .collect();
-        rows
-    };
-    if matches.len() == 1 {
-        return matches[0].0;
-    }
-    if matches.is_empty() {
-        eprintln!("ERROR: agent not found: {}", key);
-    } else {
-        eprintln!(
-            "ERROR: ambiguous agent '{}' — candidates: {}",
-            key,
-            matches
-                .iter()
-                .map(|(id, n)| format!("#{} {}", id, n))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        );
-    }
-    std::process::exit(1);
-}
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -222,20 +169,6 @@ fn main() -> ExitCode {
                     &conn, cid, &etype, amount, o.notes.as_deref(), o.date.as_deref(),
                 )?;
                 println!("OK: {} entry Rs. {:.0} recorded for customer #{} (ledger id {})", etype, amount, cid, id);
-                Ok(())
-            }
-
-            "agent-cash" => {
-                if rest.len() < 2 {
-                    return Err("usage: agent-cash <agent_id|code> <amount> [--notes N]".into());
-                }
-                let amount: f64 = rest[1].parse().map_err(|_| "amount must be numeric".to_string())?;
-                let o = parse_opts(&rest[2..]);
-                let conn = open_db();
-                let agent_id = resolve_agent(&conn, &rest[0]);
-                let entry_id = agents::receive_agent_cash(&conn, agent_id, amount, o.notes.as_deref())
-                    .map_err(|e| e.to_string())?;
-                println!("OK: cash Rs. {:.0} recorded for agent #{} (ledger id {})", amount, agent_id, entry_id);
                 Ok(())
             }
 

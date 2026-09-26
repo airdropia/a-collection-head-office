@@ -11,7 +11,6 @@ pub mod catalog_publish;
 pub mod inventory;
 pub mod customers;
 pub mod reports;
-pub mod agents;
 pub mod purchase_trips;
 pub mod adapters;
 pub mod ai;
@@ -84,22 +83,6 @@ pub fn run() {
             commands::ai_commands::generate_social_post,
             commands::ai_commands::generate_marketing,
             commands::backup_commands::init_database,
-            // v0.11.0 — Agents
-            commands::agents_commands::get_agents,
-            commands::agents_commands::add_agent,
-            commands::agents_commands::update_agent,
-            commands::agents_commands::delete_agent,
-            commands::agents_commands::get_agent_ledger,
-            commands::agents_commands::get_product_agent_stock,
-            commands::agents_commands::send_stock_to_agent,
-            commands::agents_commands::return_stock_from_agent,
-            commands::agents_commands::report_agent_sale,
-            commands::agents_commands::receive_agent_cash,
-            commands::agents_commands::adjust_agent_balance,
-            // v0.29.0 — Agent manual ledger entries (maal value + advance + edit/delete)
-            commands::agents_commands::add_agent_manual_entry,
-            commands::agents_commands::update_agent_ledger_entry,
-            commands::agents_commands::delete_agent_ledger_entry,
             // v0.11.1 — Share Center
             commands::share_segments_commands::log_share,
             commands::share_segments_commands::get_share_logs,

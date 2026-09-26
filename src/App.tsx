@@ -7,7 +7,6 @@ import {
   Bot,
   FileText,
   Settings as SettingsIcon,
-  UserCircle,
   Megaphone,
   Truck,
   ChevronLeft,
@@ -22,7 +21,6 @@ import Inventory from './pages/Inventory'
 import Automation from './pages/Automation'
 import Reports from './pages/Reports'
 import SettingsPage from './pages/Settings'
-import AgentsPage from './pages/Agents'
 import ShareCenter from './pages/ShareCenter'
 import PurchaseTripsPage from './pages/PurchaseTrips'
 import AiWorkspace from './components/AiWorkspace'
@@ -33,7 +31,6 @@ const tabs = [
   { id: 'share_center', label: 'Share Center', icon: Megaphone },
   { id: 'customers', label: 'Customers', icon: Users },
   { id: 'inventory', label: 'Inventory', icon: Package },
-  { id: 'agents', label: 'Agents', icon: UserCircle },
   { id: 'purchase_trips', label: 'Trips', icon: Truck },
   { id: 'automation', label: 'Automation', icon: Bot },
   { id: 'reports', label: 'Reports', icon: FileText },
@@ -57,7 +54,6 @@ function App() {
       case 'customers': return <Customers />
       case 'inventory': return <Inventory />
       case 'automation': return <Automation />
-      case 'agents': return <AgentsPage />
       case 'purchase_trips': return <PurchaseTripsPage />
       case 'reports': return <Reports />
       case 'settings': return <SettingsPage />

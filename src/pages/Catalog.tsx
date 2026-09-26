@@ -4,7 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import {
   Search, Download, Upload, Plus, Edit, Trash2, Image as ImageIcon,
-  X, Palette, MapPin, Share2, ChevronDown, CheckSquare, Square,
+  X, Palette, Share2, ChevronDown, CheckSquare, Square,
   MessageCircle, Facebook, Instagram, Twitter, ShoppingCart, Globe, Link2,
   RotateCcw, EyeOff
 } from 'lucide-react'
@@ -13,12 +13,6 @@ import {
   shareToPlatform, buildProductShareText,
   ALL_SHARE_PLATFORMS, PLATFORM_LABELS, SharePlatform
 } from '../utils/share'
-
-interface AgentStockEntry {
-  agent_id: number;
-  agent_name: string;
-  quantity: number;
-}
 
 const SEASONS = ['', 'Summer', 'Winter', 'Eid Special', 'Festive', 'Spring', 'Autumn']
 
@@ -50,12 +44,6 @@ export default function Catalog() {
   const [colorSearch, setColorSearch] = useState('')
   const [showModal, setShowModal] = useState(false)
   const [editProduct, setEditProduct] = useState<Product | null>(null)
-  const [agentStock, setAgentStock] = useState<AgentStockEntry[]>([])
-  // v0.16.3: Track ORIGINAL agent stock values when editing so we can
-  // compare on save and send/return the difference. Previously agent
-  // stock was only saved for NEW products — editing existing products
-  // silently dropped any changes.
-  const [originalAgentStock, setOriginalAgentStock] = useState<Record<number, number>>({})
 
   // Form states
   const [productCode, setProductCode] = useState('')
@@ -88,19 +76,16 @@ export default function Catalog() {
   const shareMenuRef = useRef<HTMLDivElement>(null)
   const bulkShareRef = useRef<HTMLDivElement>(null)
 
-  // v0.12.5: Sale modal state
+  // v0.12.5: Sale modal state (v0.36.0: agent sale mode removed — direct sales only)
   const [showSaleModal, setShowSaleModal] = useState(false)
   const [saleProduct, setSaleProduct] = useState<Product | null>(null)
-  const [saleMode, setSaleMode] = useState<'direct' | 'agent'>('direct')
   const [saleQty, setSaleQty] = useState(1)
   const [saleUnitPrice, setSaleUnitPrice] = useState(0)
   const [saleChannel, setSaleChannel] = useState('head_office')
-  const [saleAgentId, setSaleAgentId] = useState<number | ''>('')
   const [saleCustomerName, setSaleCustomerName] = useState('')
   const [saleCustomerPhone, setSaleCustomerPhone] = useState('')
   const [saleNotes, setSaleNotes] = useState('')
   const [saleSaving, setSaleSaving] = useState(false)
-  const [agents, setAgents] = useState<{agent: {id: number; name: string; city?: string}}[]>([])
   // v0.26.0: Udhar/Credit fields
   const [saleAmountPaid, setSaleAmountPaid] = useState(0)
   const [saleCustomerId, setSaleCustomerId] = useState<number | ''>('')
@@ -115,11 +100,6 @@ export default function Catalog() {
 
   useEffect(() => { fetchProducts() }, [])
 
-  // Load agents for the sale modal dropdown
-  useEffect(() => {
-    invoke('get_agents').then((data: any) => setAgents(data || [])).catch(() => {})
-  }, [])
-
   // v0.26.0: Load customers for the sale modal dropdown
   useEffect(() => {
     invoke<Customer[]>('get_customers').then(setCustomersList).catch(() => {})
@@ -127,11 +107,9 @@ export default function Catalog() {
 
   const handleOpenSaleModal = (p: Product) => {
     setSaleProduct(p)
-    setSaleMode('direct')
     setSaleQty(1)
     setSaleUnitPrice(p.sale_price)
     setSaleChannel('head_office')
-    setSaleAgentId('')
     setSaleCustomerName('')
     setSaleCustomerPhone('')
     setSaleNotes('')
@@ -151,8 +129,7 @@ export default function Catalog() {
         productId: saleProduct.id,
         qty: saleQty,
         unitSalePrice: saleUnitPrice,
-        saleChannel: saleMode === 'agent' ? 'agent' : saleChannel,
-        agentId: saleMode === 'agent' && saleAgentId !== '' ? Number(saleAgentId) : null,
+        saleChannel: saleChannel,
         customerName: saleCustomerName || null,
         customerPhone: saleCustomerPhone || null,
         notes: saleNotes || null,
@@ -298,11 +275,6 @@ export default function Catalog() {
     setSeason(''); setFabric(''); setDesignType(''); setGender('')
     setCostPrice(''); setSalePrice(''); setRetailPrice('')
     setDescription(''); setTags(''); setStockQuantity(''); setStatus('active'); setImages([])
-    // v0.13.7: Load agents instead of locations for Agent Stock section
-    try {
-      const agents: any[] = await invoke('get_agents')
-      setAgentStock(agents.map((a: any) => ({ agent_id: a.agent.id, agent_name: a.agent.name, quantity: 0 })))
-    } catch { setAgentStock([]) }
     setShowModal(true)
   }
 
@@ -348,35 +320,7 @@ export default function Catalog() {
     setStockQuantity(p.stock_quantity ? String(p.stock_quantity) : '')
     setStatus(p.status)
     try { setImages(JSON.parse(p.images || '[]')) } catch { setImages([]) }
-    // v0.14.10: Load ACTUAL agent stock for this product (was hardcoded 0).
-    // v0.16.3: Also save ORIGINAL values so handleSave can compare and
-    // send/return the difference (not just for new products).
-    try {
-      if (p.id) {
-        const agentStockData: any[] = await invoke('get_product_agent_stock', { productId: p.id })
-        const stockEntries = agentStockData.map((a: any) => ({ agent_id: a.agent_id, agent_name: a.agent_name, quantity: a.quantity }))
-        setAgentStock(stockEntries)
-        // Save original values for comparison on save
-        const origMap: Record<number, number> = {}
-        stockEntries.forEach((s: any) => { origMap[s.agent_id] = s.quantity })
-        setOriginalAgentStock(origMap)
-      } else {
-        const agents: any[] = await invoke('get_agents')
-        setAgentStock(agents.map((a: any) => ({ agent_id: a.agent.id, agent_name: a.agent.name, quantity: 0 })))
-        setOriginalAgentStock({})
-      }
-    } catch {
-      // Fallback: just load agents with 0 quantity
-      try {
-        const agents: any[] = await invoke('get_agents')
-        setAgentStock(agents.map((a: any) => ({ agent_id: a.agent.id, agent_name: a.agent.name, quantity: 0 })))
-      } catch { setAgentStock([]) }
-    }
     setShowModal(true)
-  }
-
-  const handleAgentStockChange = (agentId: number, quantity: number) => {
-    setAgentStock(prev => prev.map(a => a.agent_id === agentId ? { ...a, quantity } : a))
   }
 
   const handleSave = async (e: React.FormEvent) => {
@@ -431,64 +375,12 @@ export default function Catalog() {
     }
 
     try {
-      let productId: number
       if (editProduct?.id) {
         await updateProduct(productData)
-        productId = editProduct.id
       } else {
-        productId = await addProduct(productData) as unknown as number
+        await addProduct(productData)
       }
-      // v0.13.7: Agent stock — for NEW products, send initial allocation.
-      // v0.16.3: For EXISTING products, compare current values with original
-      // and send/return the difference. Previously editing agent stock on
-      // existing products was silently ignored.
-      if (!editProduct?.id) {
-        // NEW product — send initial allocation
-        for (const ag of agentStock) {
-          if (ag.quantity > 0) {
-            try {
-              await invoke('send_stock_to_agent', {
-                agentId: ag.agent_id,
-                productId,
-                qty: ag.quantity,
-                unitPrice: costPriceNum,
-                notes: 'Initial stock from Catalog form',
-              })
-            } catch (err) { console.warn(`Failed to send stock to agent ${ag.agent_name}:`, err) }
-          }
-        }
-      } else {
-        // EXISTING product — compare with original and send/return difference
-        for (const ag of agentStock) {
-          const originalQty = originalAgentStock[ag.agent_id] || 0
-          const newQty = ag.quantity
-          const diff = newQty - originalQty
-
-          if (diff > 0) {
-            // Stock increased — send more to agent
-            try {
-              await invoke('send_stock_to_agent', {
-                agentId: ag.agent_id,
-                productId,
-                qty: diff,
-                unitPrice: costPriceNum,
-                notes: 'Stock adjustment from Catalog form edit',
-              })
-            } catch (err) { console.warn(`Failed to send stock to agent ${ag.agent_name}:`, err) }
-          } else if (diff < 0) {
-            // Stock decreased — return from agent
-            try {
-              await invoke('return_stock_from_agent', {
-                agentId: ag.agent_id,
-                productId,
-                qty: -diff,  // return_stock expects positive qty
-                unitPrice: costPriceNum,
-                notes: 'Stock adjustment from Catalog form edit',
-              })
-            } catch (err) { console.warn(`Failed to return stock from agent ${ag.agent_name}:`, err) }
-          }
-        }
-      }
+      // v0.36.0: Agent stock allocation removed with the Agents feature.
       setShowModal(false)
     } catch (err) { alert(`Error: ${err}`) }
   }
@@ -1079,23 +971,7 @@ export default function Catalog() {
                   className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500" />
               </div>
 
-              {/* Agent Stock (v0.13.7: replaces Location Stock) */}
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-400 mb-2 flex items-center space-x-1">
-                  <MapPin size={12} /><span>Agent Stock (initial allocation)</span>
-                </label>
-                <div className="space-y-1.5">
-                  {agentStock.length === 0 ? (
-                    <p className="text-xs text-gray-600 italic">No agents added yet. Go to Agents tab to add agents.</p>
-                  ) : agentStock.map(ag => (
-                    <div key={ag.agent_id} className="flex items-center space-x-2">
-                      <span className="text-xs text-gray-400 w-32">{ag.agent_name}</span>
-                      <input type="number" value={ag.quantity} onChange={e => handleAgentStockChange(ag.agent_id, Number(e.target.value))}
-                        className="w-20 bg-slate-950 border border-gray-800 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-violet-500" />
-                    </div>
-                  ))}
-                </div>
-              </div>
+              {/* Agent Stock section removed in v0.36.0 (Agents feature removed) */}
 
               <div>
                 <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Description</label>
@@ -1163,59 +1039,24 @@ export default function Catalog() {
               {/* Product info */}
               <div className="bg-slate-950/50 border border-gray-800 rounded-lg p-3">
                 <div className="text-sm font-semibold text-white">{saleProduct.name}</div>
-                <div className="text-[10px] text-gray-500">SKU: {saleProduct.sku} • HO: {saleProduct.qty_in_head_office ?? saleProduct.stock_quantity} • Agents: {saleProduct.qty_with_agents ?? 0}</div>
+                <div className="text-[10px] text-gray-500">SKU: {saleProduct.sku} • HO: {saleProduct.qty_in_head_office ?? saleProduct.stock_quantity}</div>
               </div>
 
-              {/* Mode tabs */}
-              <div className="flex space-x-1 bg-slate-950 p-1 rounded-lg border border-gray-800">
-                <button
-                  onClick={() => setSaleMode('direct')}
-                  className={`flex-1 px-3 py-1.5 rounded text-xs font-medium ${saleMode === 'direct' ? 'bg-violet-600 text-white' : 'text-gray-400'}`}
+              {/* Sale Channel — v0.36.0: agent mode removed, direct sales only */}
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Sale Channel</label>
+                <select
+                  value={saleChannel}
+                  onChange={e => setSaleChannel(e.target.value)}
+                  className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
                 >
-                  Direct Sale (HO)
-                </button>
-                <button
-                  onClick={() => setSaleMode('agent')}
-                  className={`flex-1 px-3 py-1.5 rounded text-xs font-medium ${saleMode === 'agent' ? 'bg-violet-600 text-white' : 'text-gray-400'}`}
-                >
-                  Agent Sale
-                </button>
+                  <option value="head_office">Head Office (Walk-in)</option>
+                  <option value="whatsapp">WhatsApp</option>
+                  <option value="facebook">Facebook</option>
+                  <option value="instagram">Instagram</option>
+                  <option value="tiktok">TikTok</option>
+                </select>
               </div>
-
-              {/* Agent selector (only for agent mode) */}
-              {saleMode === 'agent' && (
-                <div>
-                  <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Agent *</label>
-                  <select
-                    value={saleAgentId}
-                    onChange={e => setSaleAgentId(e.target.value ? Number(e.target.value) : '')}
-                    className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
-                  >
-                    <option value="">-- Select Agent --</option>
-                    {agents.map(a => (
-                      <option key={a.agent.id} value={a.agent.id}>{a.agent.name} ({a.agent.city || '—'})</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {/* Channel (only for direct mode) */}
-              {saleMode === 'direct' && (
-                <div>
-                  <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Sale Channel</label>
-                  <select
-                    value={saleChannel}
-                    onChange={e => setSaleChannel(e.target.value)}
-                    className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
-                  >
-                    <option value="head_office">Head Office (Walk-in)</option>
-                    <option value="whatsapp">WhatsApp</option>
-                    <option value="facebook">Facebook</option>
-                    <option value="instagram">Instagram</option>
-                    <option value="tiktok">TikTok</option>
-                  </select>
-                </div>
-              )}
 
               {/* Qty + Price */}
               <div className="grid grid-cols-2 gap-3">
@@ -1324,7 +1165,7 @@ export default function Catalog() {
               <div className="flex justify-end space-x-2 pt-3 border-t border-gray-800">
                 <button type="button" onClick={() => setShowSaleModal(false)} disabled={saleSaving}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-gray-200 rounded-lg text-sm disabled:opacity-50">Cancel</button>
-                <button type="button" onClick={handleRecordSale} disabled={saleSaving || (saleMode === 'agent' && saleAgentId === '')}
+                <button type="button" onClick={handleRecordSale} disabled={saleSaving}
                   className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium disabled:opacity-50">
                   {saleSaving ? 'Recording...' : 'Record Sale'}
                 </button>

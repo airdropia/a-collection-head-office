@@ -18,7 +18,6 @@ pub mod reports_commands;
 pub mod ai_commands;
 pub mod settings_commands;
 pub mod backup_commands;
-pub mod agents_commands;
 pub mod share_segments_commands;
 pub mod purchase_trips_commands;
 pub mod sales_commands;
@@ -95,13 +94,6 @@ pub use settings_commands::{get_settings, update_setting};
 pub use backup_commands::{
     backup_database_now, list_backups, restore_backup,
     import_from_catalog_json, init_database,
-};
-pub use agents_commands::{
-    get_agents, add_agent, update_agent, delete_agent,
-    get_agent_ledger, get_product_agent_stock,
-    send_stock_to_agent, return_stock_from_agent,
-    report_agent_sale, receive_agent_cash, adjust_agent_balance,
-    add_agent_manual_entry, update_agent_ledger_entry, delete_agent_ledger_entry,
 };
 pub use share_segments_commands::{
     log_share, get_share_logs,

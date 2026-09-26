@@ -13,7 +13,6 @@ cd a-collection-head-office
 
 # run (auto-finds DB at %APPDATA%\com.airdropia.collectionheadoffice\database.db)
 bun cli/ac.ts customers net
-bun cli/ac.ts agents list
 bun cli/ac.ts --json dashboard
 ```
 
@@ -26,8 +25,6 @@ No Node.js, no Python, no Rust needed. Only Bun.
 | `customers list` | sab customers + computed outstanding (GREEN/RED) |
 | `customers net` | net udhar summary + "we owe" count |
 | `customers khata <id\|name>` | ek customer ki poori ledger + running balance |
-| `agents list` | sab agents + outstanding + stock units |
-| `agents ledger <id\|code\|name>` | agent ledger + `rs_after` / `units_after` running columns |
 | `products list [--low-stock]` | stock view (HO/AG/SOLD qty) |
 | `sales recent [N]` | aakhri N sales (reversed excluded) |
 | `db health` | integrity, WAL size, counts, **balance drift check**, orphans |
@@ -37,12 +34,12 @@ No Node.js, no Python, no Rust needed. Only Bun.
 **Rules (agent ops ke liye):**
 
 - Low-stock rule = `(qty_in_head_office + qty_with_agents) <= 2` AND `profit_status != 'sold_out'`
-  (v0.27+ split columns — app ke legacy `stock_quantity`-based rule se different,
-  jaan boojh kar; v0.35.0 mein app align hoga)
-- Agent codes real DB mein `AGT-<timestamp>` format mein hain (jaise `AGT-1783416246276650400`)
-  — mock docs ids (`AG-001`) real DB mein nahi milte
+  (split columns; app bhi isi rule par aligned hai v0.35.0+)
 - `customers khata <name>` ambiguous ho sakta hai (same naam ke customers) —
-  error ab id + naam + masked phone dikhata hai
+  error id + naam + masked phone dikhata hai
+- Agents feature v0.36.0 mein REMOVE ho gaya — `agents`/`agent-cash` commands
+  ab exist nahi karte. Purana agent data tables mein archived hai (read via
+  `--db` custom queries only).
 
 Global flags:
 
@@ -69,12 +66,13 @@ functions) — koi duplication nahi, sign conventions guaranteed.
 ```text
 acollectionho pay-customer <customer_id> <amount> [--notes N] [--sale ID]
 acollectionho manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]
-acollectionho agent-cash <agent_id|code> <amount> [--notes N]
 acollectionho customer-add --name N [--phone P] [--location L]
 acollectionho customer-edit <id> [--name N] [--phone P] [--location L]
 acollectionho db-drift      # stored vs canonical ledger report
 acollectionho db-fix        # outstanding caches rewrite (ledger untouched)
 ```
+
+(v0.36.0: `agent-cash` command removed with the Agents feature.)
 
 Safety: GUI app band rakhein during writes. `db health` (yeh CLI) ab
 **canonical** drift check karta hai — v0.35.0 se app startup pe bhi auto-heal
@@ -82,15 +80,9 @@ chalta hai.
 
 ## Sign conventions (CRITICAL — change mat karna)
 
-Yeh formulas `src-tauri/src/agents/mod.rs` ke `get_agent_summary()` se liye
-gayi hain:
-
-- Agent outstanding = `stock_sent.value - cash_received - stock_returned.value
-  + SUM(-amount WHERE balance_adjustment)` (adjustment DB mein negated hota hai)
-- `sale_reported` = sirf stock units, money outstanding pe asar nahi
-- **Customer (v0.35.0 canonical)** = `SUM(sales.balance WHERE reversed=0)`
-  (udhar sale debts) `- SUM(payments)` `+ SUM(opening_debit)` `+
-  SUM(adjustment signed)`. Pre-v0.29 payment rows (entry_type NULL) = payment.
-  `customers.outstanding_balance` = is value ka **cache** — v0.35.0 se app
-  startup pe auto-heal hota hai. (Purana payments-only formula ADHOORA tha —
-  v0.26.x era "drift" false-positive isi wajah se tha.)
+**Customer (v0.35.0 canonical)** = `SUM(sales.balance WHERE reversed=0)`
+(udhar sale debts) `- SUM(payments)` `+ SUM(opening_debit)` `+
+SUM(adjustment signed)`. Pre-v0.29 payment rows (entry_type NULL) = payment.
+`customers.outstanding_balance` = is value ka **cache** — v0.35.0 se app
+startup pe auto-heal hota hai. (Purana payments-only formula ADHOORA tha —
+v0.26.x era "drift" false-positive isi wajah se tha.)

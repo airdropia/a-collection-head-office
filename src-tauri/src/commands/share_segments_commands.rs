@@ -7,7 +7,6 @@ use crate::catalog::{self, Product};
 use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, BestSellerItem};
 use crate::customers::{self, Customer, OrderItemInput, OrderHistory};
 use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
-use crate::agents::{self, AgentSummary, AgentLedgerEntry};
 use crate::purchase_trips::{self, PurchaseTripSummary};
 use crate::adapters::duckduckgo::{self, WebEvidence};
 use crate::ai::{self, AiResponse};

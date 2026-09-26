@@ -21,8 +21,6 @@
  *   customers list                     all customers + computed outstanding
  *   customers khata <id|name>          one customer + full ledger
  *   customers net                      net udhar summary (green/red)
- *   agents list                        all agents + computed outstanding
- *   agents ledger <id|code|name>       agent ledger + running balances
  *   products list [--low-stock]        stock view
  *   sales recent [N]                   last N sales (default 10)
  *   db health                          integrity, counts, drift checks
@@ -32,10 +30,6 @@
  * Sign conventions (MUST match src-tauri/src — do not change here):
  *   customer_payments: payment -> -amount | opening_debit -> +amount
  *                      adjustment -> +amount (stored signed)
- *   agent_ledger_entries outstanding:
- *       stock_sent.value - cash_received - stock_returned.value
- *       + SUM(-amount WHERE balance_adjustment)   [adjustment stored negated]
- *   sale_reported affects STOCK UNITS only, not money outstanding.
  *
  * Privacy: phone numbers are masked by default. NEVER paste real
  * customer names/phones into ecosystem-hq issues — mask or use IDs.
@@ -127,20 +121,6 @@ const CUSTOMER_OUTSTANDING_SQL = `
               WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'opening_debit'), 0.0)
   + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
               WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)`;
-
-// Agent outstanding, mirrors get_agent_summary() in src-tauri/src/agents/mod.rs:
-//   outstanding = stock_sent.value - cash_received - stock_returned.value
-//                 + SUM(-amount WHERE balance_adjustment)
-const AGENT_OUTSTANDING_SQL = `
-  COALESCE(SUM(CASE WHEN entry_type = 'stock_sent'         THEN  amount ELSE 0 END), 0.0)
-- COALESCE(SUM(CASE WHEN entry_type = 'cash_received'      THEN  amount ELSE 0 END), 0.0)
-- COALESCE(SUM(CASE WHEN entry_type = 'stock_returned'     THEN  amount ELSE 0 END), 0.0)
-+ COALESCE(SUM(CASE WHEN entry_type = 'balance_adjustment' THEN -amount ELSE 0 END), 0.0)`;
-
-const AGENT_STOCK_UNITS_SQL = `
-  COALESCE(SUM(CASE WHEN entry_type = 'stock_sent'    THEN qty ELSE 0 END)
--       SUM(CASE WHEN entry_type = 'stock_returned' THEN qty ELSE 0 END)
--       SUM(CASE WHEN entry_type = 'sale_reported'  THEN qty ELSE 0 END), 0)`;
 
 function direction(n: number): "RECEIVABLE" | "PAYABLE" | "ZERO" {
   if (n > 0.004) return "RECEIVABLE"; // green: HO ko lena hai
@@ -254,70 +234,6 @@ function customersKhata(key: string) {
     });
 }
 
-function agentsList() {
-  const rows = db.query(`
-    SELECT a.id, a.agent_code, a.name, a.phone, a.city, a.is_active,
-           (${AGENT_OUTSTANDING_SQL}) AS outstanding,
-           (${AGENT_STOCK_UNITS_SQL}) AS stock_units
-    FROM agents a
-    LEFT JOIN agent_ledger_entries e ON e.agent_id = a.id
-    GROUP BY a.id ORDER BY outstanding DESC`).all() as any[];
-
-  out(rows.map(r => ({
-    id: r.id, code: r.agent_code, name: r.name, phone: maskPhone(r.phone), city: r.city,
-    active: !!r.is_active, outstanding: r.outstanding, direction: direction(r.outstanding),
-    stock_units: r.stock_units,
-  })), () => {
-    console.log("AGENTS (outstanding — green=RECEIVABLE lena hai, red=PAYABLE dena hai)\n");
-    for (const r of rows) {
-      const d = direction(r.outstanding);
-      const tag = d === "RECEIVABLE" ? "GREEN lena hai" : d === "PAYABLE" ? "RED dena hai" : "ZERO";
-      console.log(`  #${r.id}  ${r.name} [${r.agent_code}]  ${rs(r.outstanding)}  [${tag}]  stock: ${r.stock_units} pcs`);
-    }
-    console.log(`\n  total: ${rows.length} agents`);
-  });
-}
-
-function agentsLedger(key: string) {
-  const isId = /^\d+$/.test(key);
-  const rows = (isId
-    ? db.query(`SELECT id, agent_code, name FROM agents WHERE id = ? LIMIT 2`).all(Number(key))
-    : db.query(`SELECT id, agent_code, name FROM agents WHERE LOWER(agent_code) = LOWER(?) OR LOWER(name) LIKE '%' || LOWER(?) || '%' ORDER BY id LIMIT 2`).all(key, key)) as any[];
-  if (rows.length === 0) die(`agent not found: ${key}`);
-  if (rows.length > 1) die(`ambiguous match for "${key}" — ${rows.map(r => `#${r.id} ${r.name} [${r.agent_code}]`).join(" | ")} — use id or code`);
-  const a = rows[0];
-
-  const entries = db.query(`
-    SELECT id, product_id, entry_type, qty, unit_price, amount, reference_code, notes, entry_date
-    FROM agent_ledger_entries WHERE agent_id = ? ORDER BY entry_date, id`).all(a.id) as any[];
-
-  let rsRunning = 0, unitRunning = 0;
-  const ledger = entries.map(e => {
-    let money = 0, units = 0;
-    if (e.entry_type === "stock_sent") { money = e.amount; units = e.qty; }
-    else if (e.entry_type === "stock_returned") { money = -e.amount; units = -e.qty; }
-    else if (e.entry_type === "cash_received") { money = -e.amount; }
-    else if (e.entry_type === "balance_adjustment") { money = -e.amount; } // stored negated
-    else if (e.entry_type === "sale_reported") { units = -e.qty; }         // units only, no money
-    rsRunning += money; unitRunning += units;
-    return { id: e.id, date: e.entry_date, type: e.entry_type, qty: e.qty, amount: e.amount,
-             money_effect: money, units_effect: units,
-             rs_after: rsRunning, units_after: unitRunning,
-             product_id: e.product_id, reference: e.reference_code ?? "", notes: e.notes ?? "" };
-  });
-
-  out({ agent: { id: a.id, code: a.agent_code, name: a.name }, outstanding: rsRunning,
-        direction: direction(rsRunning), stock_units: unitRunning, entries: ledger },
-    () => {
-      console.log(`LEDGER — ${a.name} [${a.agent_code}] (#${a.id})\n`);
-      console.log(`  ${"date".padEnd(11)} ${"type".padEnd(18)} ${"qty".padStart(4)} ${"amount".padStart(12)} ${"rs_after".padStart(12)} ${"units_after".padStart(7)}  notes`);
-      for (const e of ledger) {
-        console.log(`  ${String(e.date).padEnd(11)} ${e.type.padEnd(18)} ${String(e.qty).padStart(4)} ${rs(e.amount).padStart(12)} ${rs(e.rs_after).padStart(12)} ${String(e.units_after).padStart(7)}  ${e.notes}`);
-      }
-      console.log(`\n  OUTSTANDING: ${rs(rsRunning)}  [${direction(rsRunning) === "RECEIVABLE" ? "GREEN — lena hai" : direction(rsRunning) === "PAYABLE" ? "RED — dena hai" : "ZERO"}]   STOCK: ${unitRunning} pcs`);
-    });
-}
-
 function productsList(lowStockOnly: boolean) {
   const rows = db.query(`
     SELECT id, sku, product_code, name, category, status,
@@ -368,7 +284,6 @@ function dbHealth() {
     WHERE ABS(computed - COALESCE(stored, 0)) > 0.004`).all() as any[];
 
   const orphanPayments = count_q(`SELECT COUNT(*) AS c FROM customer_payments p LEFT JOIN customers c ON c.id = p.customer_id WHERE c.id IS NULL`);
-  const orphanLedger = count_q(`SELECT COUNT(*) AS c FROM agent_ledger_entries e LEFT JOIN agents a ON a.id = e.agent_id WHERE a.id IS NULL`);
 
   let walBytes = 0;
   try { walBytes = statSync(DB_PATH + "-wal").size; } catch {}
@@ -385,11 +300,10 @@ function dbHealth() {
     wal_note: walBytes > 4_000_000 ? "WAL file large — app checkpoint will shrink it on next clean close" : "ok",
     counts: {
       customers: count("customers"), customer_payments: count("customer_payments"),
-      agents: count("agents"), agent_ledger_entries: count("agent_ledger_entries"),
       products: count("products"), sales: count("sales"),
     },
     customer_balance_drift_rows: custDrift.map(r => ({ id: r.id, name: r.name, stored: r.stored, computed: r.computed })),
-    orphan_payments: orphanPayments, orphan_agent_ledger: orphanLedger,
+    orphan_payments: orphanPayments,
     zero_stock_but_active_products: staleStock?.c ?? 0,
   };
   out(result, () => {
@@ -397,9 +311,9 @@ function dbHealth() {
     console.log(`  path        : ${DB_PATH}`);
     console.log(`  integrity   : ${integrity}`);
     console.log(`  wal size    : ${(walBytes / 1024).toFixed(1)} KB`);
-    console.log(`  counts      : customers=${result.counts.customers} payments=${result.counts.customer_payments} agents=${result.counts.agents} ledger=${result.counts.agent_ledger_entries} products=${result.counts.products} sales=${result.counts.sales}`);
+    console.log(`  counts      : customers=${result.counts.customers} payments=${result.counts.customer_payments} products=${result.counts.products} sales=${result.counts.sales}`);
     console.log(`  bal drift   : ${custDrift.length === 0 ? "none (stored == computed)" : custDrift.length + " rows — " + JSON.stringify(result.customer_balance_drift_rows)}`);
-    console.log(`  orphans     : payments=${orphanPayments} agent_ledger=${orphanLedger}`);
+    console.log(`  orphans     : payments=${orphanPayments}`);
     console.log(`  zero-stock-but-active: ${result.zero_stock_but_active_products}`);
   });
 }
@@ -407,8 +321,6 @@ function dbHealth() {
 function dashboard() {
   const custNet = (db.query(`
     SELECT COALESCE(SUM(${CUSTOMER_OUTSTANDING_SQL}), 0.0) AS net FROM customers c`).get() as any)?.net ?? 0;
-  const agentNet = (db.query(`
-    SELECT ${AGENT_OUTSTANDING_SQL} AS net FROM agent_ledger_entries`).get() as any)?.net ?? 0;
   const lowStock = (db.query(`
     SELECT COUNT(*) AS c FROM products
     WHERE COALESCE(profit_status,'in_head_office') != 'sold_out'
@@ -417,12 +329,10 @@ function dashboard() {
   const recentSales = (db.query(`SELECT COUNT(*) AS c FROM sales WHERE reversed = 0 AND sale_date >= date('now','-30 days')`).get() as any)?.c ?? 0;
 
   out({ customers_net: custNet, customers_direction: direction(custNet),
-        agents_net: agentNet, agents_direction: direction(agentNet),
         low_stock_count: lowStock, sold_out_count: soldOut, sales_last_30d: recentSales },
     () => {
       console.log("DASHBOARD SNAPSHOT\n");
       console.log(`  Customers net : ${rs(custNet)}  [${direction(custNet) === "RECEIVABLE" ? "GREEN lena hai" : direction(custNet) === "PAYABLE" ? "RED dena hai" : "ZERO"}]`);
-      console.log(`  Agents net    : ${rs(agentNet)}  [${direction(agentNet) === "RECEIVABLE" ? "GREEN lena hai" : direction(agentNet) === "PAYABLE" ? "RED dena hai" : "ZERO"}]`);
       console.log(`  Low stock     : ${lowStock} products (<=2 pcs, not sold out)`);
       console.log(`  Sold out      : ${soldOut} products`);
       console.log(`  Sales 30d     : ${recentSales}`);
@@ -455,11 +365,6 @@ try {
       else if (sub === "khata") customersKhata(rest[0] ?? die("usage: customers khata <id|name>"));
       else die("usage: customers list | net | khata <id|name>");
       break;
-    case "agents":
-      if (sub === "list") agentsList();
-      else if (sub === "ledger") agentsLedger(rest[0] ?? die("usage: agents ledger <id|code|name>"));
-      else die("usage: agents list | ledger <id|code|name>");
-      break;
     case "products":
       if (sub === "list") productsList(rest.includes("--low-stock"));
       else die("usage: products list [--low-stock]");
@@ -481,7 +386,6 @@ DB: ${DB_PATH}
   bun cli/ac.ts [--json] [--db <path>] <command>
 
   customers list | net | khata <id|name>
-  agents list | ledger <id|code|name>
   products list [--low-stock]
   sales recent [N]
   db health
