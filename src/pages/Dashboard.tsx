@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { useAppStore } from '../stores/store'
 import {
   Package, Layers, Users,
@@ -9,11 +10,21 @@ import { fmtMoney } from '../utils/format'
 export default function Dashboard() {
   const { products, setCurrentTab, fetchProducts, fetchCustomers, customers } = useAppStore()
   const [loading, setLoading] = useState(true)
+  // v0.39.0: Recent Sales panel (pi suggestion #3) — live activity signal
+  const [recentSales, setRecentSales] = useState<any[]>([])
+
+  const loadRecentSales = () => {
+    invoke('get_recent_sales', { limit: 10 })
+      .then((rows: any) => setRecentSales(rows ?? []))
+      .catch(() => setRecentSales([]))
+  }
 
   useEffect(() => {
     fetchProducts()
     // v0.34.0: load customers so the customer-khata net line can show on dashboard
     fetchCustomers()
+    // v0.39.0: recent sales for the live activity panel
+    loadRecentSales()
     setLoading(false)
   }, [])
 
@@ -21,6 +32,7 @@ export default function Dashboard() {
     setLoading(true)
     try {
       await Promise.all([fetchProducts(), fetchCustomers()])
+      loadRecentSales()
     } finally {
       setLoading(false)
     }
@@ -104,6 +116,43 @@ export default function Dashboard() {
             </button>
           )
         })()}
+      </div>
+
+      {/* === RECENT SALES (last 10) — v0.39.0, pi suggestion #3 === */}
+      <div className="glass-card p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-white flex items-center">
+            <ShoppingCart size={14} className="mr-2 text-emerald-400" />
+            Recent Sales (last 10)
+          </h2>
+          <button onClick={() => setCurrentTab('reports')}
+            className="text-[10px] text-violet-400 hover:text-violet-300">Reports →</button>
+        </div>
+        {recentSales.length === 0 ? (
+          <p className="text-xs text-gray-500 py-6 text-center">No sales recorded yet — record one from the Catalog page.</p>
+        ) : (
+          <div className="space-y-1">
+            {recentSales.map((s) => (
+              <div key={s.id}
+                className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs ${
+                  s.reversed ? 'bg-slate-800/40 text-gray-500' : 'bg-slate-800/60 text-gray-300'
+                }`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-gray-500 font-mono shrink-0">{String(s.sale_date).slice(0, 10)}</span>
+                  <span className="truncate">{s.product ?? '?'}</span>
+                  <span className="text-gray-500 shrink-0">x{s.qty}</span>
+                  {s.reversed ? <span className="text-[9px] uppercase text-gray-600 shrink-0">undone</span> : null}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {s.customer_name ? <span className="text-gray-500">{s.customer_name}</span> : null}
+                  <span className={`font-semibold ${s.reversed ? 'text-gray-600 line-through' : 'text-white'}`}>
+                    {fmtMoney(s.total_sale_amount)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* === QUICK ACTIONS === */}

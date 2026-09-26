@@ -386,3 +386,56 @@ pub async fn reactivate_sold_product(
 
     Ok(())
 }
+
+// ============================================================
+// v0.39.0 — Dashboard: Recent Sales panel (pi suggestion #3)
+// ============================================================
+
+/// One row of the Dashboard "Recent Sales (last 10)" panel.
+/// Includes reversed sales (flagged) so the operator sees the full
+/// activity trail; GUI renders reversed rows struck-through/grey.
+#[derive(serde::Serialize)]
+pub struct RecentSaleRow {
+    pub id: i64,
+    pub sale_date: String,
+    pub product: Option<String>,
+    pub qty: i64,
+    pub total_sale_amount: f64,
+    pub sale_channel: String,
+    pub customer_name: Option<String>,
+    pub reversed: i64,
+}
+
+#[tauri::command]
+pub async fn get_recent_sales(
+    state: State<'_, DbState>,
+    limit: Option<i64>,
+) -> Result<Vec<RecentSaleRow>, String> {
+    let conn = state.0.lock().await;
+    let n = limit.unwrap_or(10).clamp(1, 100);
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, s.sale_date, p.name, s.qty, s.total_sale_amount,
+                    s.sale_channel, s.customer_name, COALESCE(s.reversed, 0)
+             FROM sales s LEFT JOIN products p ON p.id = s.product_id
+             ORDER BY s.sale_date DESC, s.id DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([n], |r| {
+            Ok(RecentSaleRow {
+                id: r.get(0)?,
+                sale_date: r.get(1)?,
+                product: r.get(2)?,
+                qty: r.get(3)?,
+                total_sale_amount: r.get(4)?,
+                sale_channel: r.get(5)?,
+                customer_name: r.get(6)?,
+                reversed: r.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}

@@ -304,7 +304,7 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     // "no such column: updated_at".
     add_col_if_missing(conn, "customers", "updated_at", "TEXT")?;
 
-    // v0.26.0: Udhar/Credit (खाता) tracking.
+    // v0.26.0: Udhar/Credit (khata) tracking.
     // customers.outstanding_balance = current total owed by this customer.
     //   Updated atomically on every sale (increases by balance amount) and
     //   every payment (decreases by payment amount).

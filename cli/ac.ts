@@ -23,6 +23,7 @@
  *   customers net                      net udhar summary (green/red)
  *   products list [--low-stock]        stock view
  *   sales recent [N]                   last N sales (default 10)
+ *   report weekly                      7-day business digest (TG-ready text)
  *   db health                          integrity, counts, drift checks
  *   dashboard                          one-screen business snapshot
  *   version                            repo/app version info
@@ -339,6 +340,80 @@ function dashboard() {
     });
 }
 
+// v0.39.0 — Weekly report (pi suggestion #5): TG-ready 7-day digest from
+// the same live tables the GUI reads (sales / customer_payments / products).
+// Replaces the v0.36-removed automation weekly report (which wrongly read
+// the dead orders table). Read-only — pastes straight into a TG message.
+function reportWeekly() {
+  const salesAgg = db.query(`
+    SELECT COUNT(*) AS n,
+           COALESCE(SUM(total_sale_amount), 0.0) AS gross,
+           COALESCE(SUM(CASE WHEN balance > 0 THEN balance ELSE 0 END), 0.0) AS udhar
+    FROM sales
+    WHERE COALESCE(reversed, 0) = 0 AND sale_date >= date('now', '-7 days')`).get() as any;
+  const byChannel = db.query(`
+    SELECT sale_channel, COUNT(*) AS n, COALESCE(SUM(total_sale_amount), 0.0) AS amt
+    FROM sales
+    WHERE COALESCE(reversed, 0) = 0 AND sale_date >= date('now', '-7 days')
+    GROUP BY sale_channel ORDER BY amt DESC`).all() as any[];
+  const topProducts = db.query(`
+    SELECT s.product_id, COALESCE(p.name, '?') AS name,
+           SUM(s.qty) AS qty, COALESCE(SUM(s.total_sale_amount), 0.0) AS amt
+    FROM sales s LEFT JOIN products p ON p.id = s.product_id
+    WHERE COALESCE(s.reversed, 0) = 0 AND s.sale_date >= date('now', '-7 days')
+    GROUP BY s.product_id ORDER BY amt DESC LIMIT 5`).all() as any[];
+  const cash = db.query(`
+    SELECT COUNT(*) AS n,
+           COALESCE(SUM(CASE WHEN COALESCE(entry_type, 'payment') = 'payment' THEN amount ELSE 0 END), 0.0) AS received
+    FROM customer_payments
+    WHERE payment_date >= date('now', '-7 days')`).get() as any;
+  const undone = (db.query(`
+    SELECT COUNT(*) AS c FROM sales
+    WHERE COALESCE(reversed, 0) = 1 AND sale_date >= date('now', '-7 days')`).get() as any)?.c ?? 0;
+  const custNet = (db.query(`
+    SELECT COALESCE(SUM(${CUSTOMER_OUTSTANDING_SQL}), 0.0) AS net FROM customers c`).get() as any)?.net ?? 0;
+  const active = (db.query(`
+    SELECT COUNT(*) AS c FROM products WHERE COALESCE(status, 'active') = 'active'`).get() as any)?.c ?? 0;
+  const lowStock = (db.query(`
+    SELECT COUNT(*) AS c FROM products
+    WHERE COALESCE(profit_status, 'in_head_office') != 'sold_out'
+      AND (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= 2`).get() as any)?.c ?? 0;
+  const soldOut = (db.query(`
+    SELECT COUNT(*) AS c FROM products WHERE COALESCE(profit_status, 'x') = 'sold_out'`).get() as any)?.c ?? 0;
+
+  const periodStart = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const periodEnd = new Date().toISOString().slice(0, 10);
+
+  out({ period: { start: periodStart, end: periodEnd, days: 7 },
+        sales: { count: salesAgg?.n ?? 0, gross: salesAgg?.gross ?? 0,
+                 udhar_added: salesAgg?.udhar ?? 0, undone_in_period: undone,
+                 by_channel: byChannel.map(r => ({ channel: r.sale_channel, count: r.n, amount: r.amt })) },
+        top_products: topProducts,
+        cash: { payments_count: cash?.n ?? 0, received: cash?.received ?? 0 },
+        khata: { customers_net: custNet, direction: direction(custNet) },
+        stock: { active, low_stock: lowStock, sold_out: soldOut } },
+    () => {
+      console.log(`=== A COLLECTION HO — WEEKLY REPORT (${periodStart} .. ${periodEnd}) ===\n`);
+      console.log("SALES (7 days, non-reversed)");
+      console.log(`  count: ${salesAgg?.n ?? 0}  |  gross: ${rs(salesAgg?.gross)}  |  udhar added: ${rs(salesAgg?.udhar)}  |  undone: ${undone}`);
+      if (byChannel.length) {
+        console.log("  by channel: " + byChannel.map(r => `${r.sale_channel} ${r.n} (${rs(r.amt)})`).join(" | "));
+      }
+      if (topProducts.length) {
+        console.log("\nTOP PRODUCTS (7 days)");
+        for (const t of topProducts) {
+          console.log(`  #${t.product_id}  ${String(t.name).slice(0, 32).padEnd(32)}  ${t.qty} pcs  ${rs(t.amt)}`);
+        }
+      }
+      console.log("\nCASH IN (customer payments, 7 days)");
+      console.log(`  received: ${rs(cash?.received)}  across ${cash?.n ?? 0} payment(s)`);
+      console.log("\nKHATA (now)");
+      console.log(`  customers net: ${rs(custNet)}  [${direction(custNet)}]`);
+      console.log("\nSTOCK (now)");
+      console.log(`  active: ${active}  |  low stock (<=2): ${lowStock}  |  sold out: ${soldOut}`);
+    });
+}
+
 function version() {
   let app = "unknown";
   try {
@@ -377,6 +452,10 @@ try {
       if (sub === "health") dbHealth();
       else die("usage: db health");
       break;
+    case "report":
+      if (sub === "weekly") reportWeekly();
+      else die("usage: report weekly");
+      break;
     case "dashboard": dashboard(); break;
     case "version": version(); break;
     default:
@@ -388,6 +467,7 @@ DB: ${DB_PATH}
   customers list | net | khata <id|name>
   products list [--low-stock]
   sales recent [N]
+  report weekly
   db health
   dashboard
   version`);

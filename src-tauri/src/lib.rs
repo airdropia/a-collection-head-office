@@ -83,7 +83,9 @@ pub fn run() {
             // v0.30.0 — Sale undo + sold items reactivation
             commands::sales_commands::undo_sale,
             commands::sales_commands::reactivate_sold_product,
-            // v0.26.0 — Customer Udhar/Credit (खाता)
+            // v0.39.0 — Dashboard Recent Sales panel (pi suggestion #3)
+            commands::sales_commands::get_recent_sales,
+            // v0.26.0 — Customer Udhar/Credit (khata)
             commands::udhar_commands::record_customer_payment,
             commands::udhar_commands::get_customer_balance_history,
             // v0.29.0 — Customer manual ledger entries (opening balance + adjustments)

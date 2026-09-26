@@ -15,11 +15,11 @@ use rusqlite::{Connection, params};
 use tauri::State;
 
 // ============================================================
-// // Customer Udhar/Credit (खाता): record_payment + balance_history
+// // Customer Udhar/Credit (khata): record_payment + balance_history
 // ============================================================
 
 // ============================================================
-// v0.26.0: CUSTOMER UDHAR / CREDIT (खाता) TRACKING
+// v0.26.0: CUSTOMER UDHAR / CREDIT (khata) TRACKING
 // ============================================================
 
 /// Record a payment from a customer against their outstanding balance.
