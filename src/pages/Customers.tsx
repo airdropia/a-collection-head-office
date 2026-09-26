@@ -1,12 +1,10 @@
 import React, { useEffect, useState } from 'react'
-import { useAppStore, Customer, OrderHistory } from '../stores/store'
+import { useAppStore, Customer } from '../stores/store'
 import { invoke } from '@tauri-apps/api/core'
 import { 
   Search, 
   UserPlus, 
   Phone, 
-  Calendar, 
-  ShoppingBag, 
   User, 
   Trash2,
   X,
@@ -21,23 +19,14 @@ import { fmtMoney } from '../utils/format'
 export default function Customers() {
   const { 
     customers, 
-    products,
     fetchCustomers, 
-    fetchProducts,
     addCustomer, 
     updateCustomer, 
     deleteCustomer,
-    cart,
-    addToCart,
-    removeFromCart,
-    clearCart,
-    createOrder,
-    getCustomerHistory
   } = useAppStore()
 
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null)
-  const [purchaseHistory, setPurchaseHistory] = useState<OrderHistory[]>([])
   
   // Customer Modals
   const [showCustModal, setShowCustModal] = useState(false)
@@ -48,8 +37,6 @@ export default function Customers() {
   const [custNotes, setCustNotes] = useState('')
 
   // Order Placement Modal
-  const [showOrderModal, setShowOrderModal] = useState(false)
-  const [orderSearch, setOrderSearch] = useState('')
 
   // v0.26.0: Payment modal state
   const [showPaymentModal, setShowPaymentModal] = useState(false)
@@ -78,25 +65,7 @@ export default function Customers() {
 
   useEffect(() => {
     fetchCustomers()
-    fetchProducts()
   }, [])
-
-  useEffect(() => {
-    if (selectedCustomerId) {
-      loadHistory(selectedCustomerId)
-    } else {
-      setPurchaseHistory([])
-    }
-  }, [selectedCustomerId])
-
-  const loadHistory = async (id: number) => {
-    try {
-      const history = await getCustomerHistory(id)
-      setPurchaseHistory(history)
-    } catch (err) {
-      console.error(err)
-    }
-  }
 
   const handleOpenAddCust = () => {
     setEditCustomer(null)
@@ -325,29 +294,6 @@ export default function Customers() {
   // v0.34.0: customers with negative balance — we owe them (advance/maal wapas)
   const customersWeOwe = customers.filter(c => (c.outstanding_balance || 0) < 0).length
 
-  const handlePlaceOrder = async () => {
-    if (!selectedCustomerId) return
-    if (cart.length === 0) {
-      alert('Your cart is empty. Please add products first.')
-      return
-    }
-
-    const items = cart.map(item => ({
-      product_id: item.product.id!,
-      quantity: item.quantity
-    }))
-
-    try {
-      await createOrder(selectedCustomerId, items)
-      clearCart()
-      setShowOrderModal(false)
-      loadHistory(selectedCustomerId)
-      alert('Order placed successfully! Stock levels updated.')
-    } catch (err) {
-      alert(`Failed to place order: ${err}`)
-    }
-  }
-
   // Filters
   const filteredCustomers = customers.filter(c => 
     c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -356,15 +302,6 @@ export default function Customers() {
   )
 
   const activeCustomer = customers.find(c => c.id === selectedCustomerId)
-
-  // Products filter for order modal
-  const filteredProductsForOrder = products.filter(p => 
-    p.status === 'active' && 
-    p.stock_quantity > 0 &&
-    (p.name.toLowerCase().includes(orderSearch.toLowerCase()) || p.sku.toLowerCase().includes(orderSearch.toLowerCase()))
-  )
-
-  const totalCartValue = cart.reduce((acc, item) => acc + item.product.sale_price * item.quantity, 0)
 
   return (
     <div className="space-y-6">
@@ -540,12 +477,6 @@ export default function Customers() {
                     >
                       Edit Profile
                     </button>
-                    <button 
-                      onClick={() => setShowOrderModal(true)}
-                      className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-medium transition-colors glow-btn"
-                    >
-                      New Order
-                    </button>
                   </div>
                 </div>
 
@@ -567,47 +498,11 @@ export default function Customers() {
                 )}
               </div>
 
-              {/* Purchase History */}
-              <div className="glass-card p-5">
-                <h3 className="text-lg font-semibold text-white mb-4 flex items-center">
-                  <ShoppingBag className="mr-2 text-violet-500" size={18} /> Purchase History
-                </h3>
-                
-                <div className="space-y-3 overflow-y-auto max-h-[250px] pr-1">
-                  {purchaseHistory.length === 0 ? (
-                    <p className="text-sm text-gray-500 text-center py-6">No previous orders found for this customer.</p>
-                  ) : (
-                    purchaseHistory.map(order => (
-                      <div key={order.order_id} className="p-4 bg-slate-950 border border-gray-800 rounded-xl space-y-3">
-                        <div className="flex justify-between items-center text-xs">
-                          <div className="space-y-0.5">
-                            <p className="text-gray-400">Order ID: #{order.order_id}</p>
-                            <p className="text-gray-500 flex items-center"><Calendar size={10} className="mr-1" />{new Date(order.order_date).toLocaleString()}</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm font-bold text-violet-400">Rs. {order.total_amount.toFixed(2)}</p>
-                            <p className="text-[10px] text-emerald-400">Est. Profit: Rs. {order.profit.toFixed(2)}</p>
-                          </div>
-                        </div>
-
-                        <div className="border-t border-gray-900 pt-2 space-y-1">
-                          {order.items.map((item, idx) => (
-                            <div key={idx} className="flex justify-between text-xs text-gray-400">
-                              <span>{item.product_name} <span className="text-gray-600">x{item.quantity}</span></span>
-                              <span className="font-mono">${(item.sale_price * item.quantity).toFixed(2)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
             </>
           ) : (
             <div className="glass-card p-12 text-center text-gray-500 flex flex-col items-center justify-center h-[350px]">
               <User size={48} className="text-gray-700 mb-4" />
-              <p className="text-sm">Select a customer from the list to view profile, order history, and place new orders.</p>
+              <p className="text-sm">Select a customer from the list to view their profile and khata.</p>
             </div>
           )}
         </div>
@@ -683,106 +578,6 @@ export default function Customers() {
       )}
 
       {/* Order Placement Modal */}
-      {showOrderModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-slate-900 border border-gray-800 rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-slate-950/40">
-              <h3 className="text-lg font-bold text-white font-display">
-                Place Sales Order for {activeCustomer?.name}
-              </h3>
-              <button onClick={() => setShowOrderModal(false)} className="text-gray-400 hover:text-white transition-colors">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-6">
-              {/* Product Selector */}
-              <div className="space-y-3 flex flex-col h-[350px]">
-                <p className="text-xs font-semibold uppercase text-gray-400">Select Products</p>
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-2 text-gray-500" size={14} />
-                  <input 
-                    type="text"
-                    placeholder="Search product to add..."
-                    value={orderSearch}
-                    onChange={(e) => setOrderSearch(e.target.value)}
-                    className="w-full bg-slate-950 border border-gray-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-violet-500"
-                  />
-                </div>
-
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-                  {filteredProductsForOrder.map(product => (
-                    <div key={product.id} className="p-2 bg-slate-950 border border-gray-850 rounded-lg flex justify-between items-center text-xs">
-                      <div>
-                        <p className="font-semibold text-white">{product.name}</p>
-                        <p className="text-[10px] text-gray-500">SKU: {product.sku} | Stock: {product.stock_quantity}</p>
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        <span className="font-mono text-violet-400 font-bold">${product.sale_price.toFixed(2)}</span>
-                        <button
-                          onClick={() => addToCart(product, 1)}
-                          className="bg-violet-600 hover:bg-violet-700 text-white rounded px-2 py-1 font-medium transition-colors"
-                        >
-                          Add
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Order Cart */}
-              <div className="space-y-3 flex flex-col h-[350px] border-l border-gray-800 pl-4">
-                <p className="text-xs font-semibold uppercase text-gray-400">Order Cart</p>
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-                  {cart.length === 0 ? (
-                    <p className="text-xs text-gray-500 text-center py-12">No items in cart.</p>
-                  ) : (
-                    cart.map(item => (
-                      <div key={item.product.id} className="p-2 bg-slate-950 border border-gray-850 rounded-lg flex justify-between items-center text-xs">
-                        <div>
-                          <p className="font-semibold text-white">{item.product.name}</p>
-                          <p className="text-[10px] text-gray-500">${item.product.sale_price.toFixed(2)} x {item.quantity}</p>
-                        </div>
-                        <button
-                          onClick={() => item.product.id && removeFromCart(item.product.id)}
-                          className="text-gray-500 hover:text-red-400 p-1"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                {/* Subtotal */}
-                <div className="border-t border-gray-800 pt-3 space-y-2">
-                  <div className="flex justify-between items-center text-sm font-bold text-white">
-                    <span>Total Amount:</span>
-                    <span className="font-mono text-violet-400">${totalCartValue.toFixed(2)}</span>
-                  </div>
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={clearCart}
-                      className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-gray-300 rounded-lg text-xs"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      onClick={handlePlaceOrder}
-                      disabled={cart.length === 0}
-                      className="flex-1 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-medium disabled:opacity-50"
-                    >
-                      Confirm Order
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* v0.34.0: Payment Modal — works both ways now.
           Positive balance: customer pays us (green, existing flow).
           Negative balance: we pay/settle the customer (red). The backend

@@ -5,9 +5,8 @@
 
 use crate::catalog::{self, Product};
 use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, BestSellerItem};
-use crate::customers::{self, Customer, OrderItemInput, OrderHistory};
+use crate::customers::{self, Customer};
 use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
-use crate::purchase_trips::{self, PurchaseTripSummary};
 use crate::utils;
 use crate::commands::{DbState, set_setting_val, get_setting_val};
 use tauri::async_runtime::Mutex;
@@ -43,18 +42,6 @@ pub async fn update_customer(state: State<'_, DbState>, customer: Customer) -> R
 pub async fn delete_customer(state: State<'_, DbState>, id: i64) -> Result<(), String> {
     let conn = state.0.lock().await;
     customers::delete_customer(&conn, id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn create_order(state: State<'_, DbState>, customer_id: i64, items: Vec<OrderItemInput>) -> Result<i64, String> {
-    let mut conn = state.0.lock().await;
-    customers::create_order(&mut conn, customer_id, items).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_customer_history(state: State<'_, DbState>, customer_id: i64) -> Result<Vec<OrderHistory>, String> {
-    let conn = state.0.lock().await;
-    customers::get_customer_purchase_history(&conn, customer_id).map_err(|e| e.to_string())
 }
 
 /// v0.35.0 (Phase B): recompute every customer's outstanding_balance cache

@@ -5,9 +5,8 @@
 
 use crate::catalog::{self, Product};
 use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, BestSellerItem};
-use crate::customers::{self, Customer, OrderItemInput, OrderHistory};
+use crate::customers::{self, Customer};
 use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
-use crate::purchase_trips::{self, PurchaseTripSummary};
 use crate::utils;
 use crate::commands::{DbState, set_setting_val, get_setting_val};
 use tauri::async_runtime::Mutex;
@@ -242,111 +241,6 @@ pub async fn save_image_for_share(
     Ok(file_path.to_string_lossy().to_string())
 }
 
-/// v0.20.0: Save drafts (caption + HD images) to a user-selected folder.
-///
-/// Ali bhai's requirement:
-/// - "Save Draft" button in Share Center
-/// - User can pick a custom folder
-/// - Full caption (text) + all HD images of that product saved to folder
-///
-/// Architecture:
-/// - Frontend opens folder picker via @tauri-apps/plugin-dialog open({ directory: true })
-/// - Frontend calls this command with chosen folder_path + product_name + captions + image_filenames
-/// - This command creates subfolder: "<safe_product_name>_<timestamp>"
-/// - Saves caption as "caption_<platform>.txt" (one file per platform)
-/// - If multiple platforms, also saves combined "all_captions.txt"
-/// - Copies HD images from AppData images dir to subfolder (prefixed with index for ordering)
-/// - Writes README.txt summary in subfolder
-///
-/// Returns the path of the created subfolder.
-#[tauri::command]
-pub async fn save_drafts_to_folder_with_path(
-    folder_path: String,
-    product_name: String,
-    captions: std::collections::HashMap<String, String>,
-    image_filenames: Vec<String>,
-) -> Result<String, String> {
-    // Sanitize product name for folder name
-    let safe_name: String = product_name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() { c }
-            else if c == '-' || c == '_' { c }
-            else { '-' }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-    let safe_name = if safe_name.is_empty() { "product".to_string() } else { safe_name };
-
-    // Timestamp for unique subfolder
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let subfolder_name = format!("{}_{}", safe_name, timestamp);
-    let subfolder_path = std::path::Path::new(&folder_path).join(&subfolder_name);
-
-    // Create subfolder
-    std::fs::create_dir_all(&subfolder_path)
-        .map_err(|e| format!("Failed to create folder: {}", e))?;
-
-    // Save captions as separate .txt files (one per platform)
-    for (platform, content) in &captions {
-        let filename = format!("caption_{}.txt", platform);
-        let filepath = subfolder_path.join(&filename);
-        std::fs::write(&filepath, content)
-            .map_err(|e| format!("Failed to write {}: {}", filename, e))?;
-    }
-
-    // If multiple platforms, also save a combined "all_captions.txt"
-    if captions.len() > 1 {
-        let mut combined = String::new();
-        combined.push_str(&format!("=== {} ===\n\n", product_name));
-        for (platform, content) in &captions {
-            combined.push_str(&format!("--- {} ---\n{}\n\n", platform.to_uppercase(), content));
-        }
-        let combined_path = subfolder_path.join("all_captions.txt");
-        std::fs::write(&combined_path, combined)
-            .map_err(|e| format!("Failed to write all_captions.txt: {}", e))?;
-    }
-
-    // Copy HD images from AppData images dir to subfolder
-    let images_dir = utils::get_images_dir();
-    let mut images_copied = 0;
-    let mut image_errors: Vec<String> = Vec::new();
-
-    for (idx, filename) in image_filenames.iter().enumerate() {
-        let src_path = images_dir.join(filename);
-        if !src_path.exists() {
-            image_errors.push(format!("Image not found: {}", filename));
-            continue;
-        }
-
-        // Prefix with index for ordering, keep original filename
-        let dest_filename = format!("{:02}_{}", idx + 1, filename);
-        let dest_path = subfolder_path.join(&dest_filename);
-
-        match std::fs::copy(&src_path, &dest_path) {
-            Ok(_) => images_copied += 1,
-            Err(e) => image_errors.push(format!("Copy {}: {}", filename, e)),
-        }
-    }
-
-    // Build summary message
-    let mut summary = format!(
-        "Saved to: {}\nCaptions: {} platforms\nImages: {} copied",
-        subfolder_path.display(),
-        captions.len(),
-        images_copied
-    );
-    if !image_errors.is_empty() {
-        summary.push_str(&format!("\nErrors: {}", image_errors.join("; ")));
-    }
-
-    // Write summary as README.txt in subfolder
-    let readme_path = subfolder_path.join("README.txt");
-    let _ = std::fs::write(&readme_path, &summary);
-
-    Ok(subfolder_path.to_string_lossy().to_string())
-}
 
 // ============================================================
 // v0.33.0: MANUAL SOLD-OUT MARKING

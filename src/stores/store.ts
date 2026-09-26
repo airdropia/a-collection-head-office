@@ -49,26 +49,6 @@ export interface Customer {
   segment?: string;
 }
 
-export interface OrderItemInput {
-  product_id: number;
-  quantity: number;
-}
-
-export interface OrderItemDetail {
-  product_name: string;
-  sku: string;
-  quantity: number;
-  sale_price: number;
-}
-
-export interface OrderHistory {
-  order_id: number;
-  order_date: string;
-  total_amount: number;
-  profit: number;
-  items: OrderItemDetail[];
-}
-
 interface AppState {
   // Navigation & UI
   currentTab: string;
@@ -90,14 +70,6 @@ interface AppState {
   addCustomer: (customer: Customer) => Promise<void>;
   updateCustomer: (customer: Customer) => Promise<void>;
   deleteCustomer: (id: number) => Promise<void>;
-  createOrder: (customerId: number, items: OrderItemInput[]) => Promise<number>;
-  getCustomerHistory: (customerId: number) => Promise<OrderHistory[]>;
-
-  // Cart (for placing orders)
-  cart: { product: Product; quantity: number }[];
-  addToCart: (product: Product, quantity: number) => void;
-  removeFromCart: (productId: number) => void;
-  clearCart: () => void;
 
   // Settings
   settings: Record<string, string>;
@@ -203,44 +175,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       throw new Error(String(err));
     }
   },
-  createOrder: async (customerId, items) => {
-    try {
-      const orderId = await invoke<number>('create_order', { customerId, items });
-      await get().fetchProducts(); // Refresh stock
-      return orderId;
-    } catch (err) {
-      throw new Error(String(err));
-    }
-  },
-  getCustomerHistory: async (customerId) => {
-    try {
-      return await invoke<OrderHistory[]>('get_customer_history', { customerId });
-    } catch (err) {
-      throw new Error(String(err));
-    }
-  },
-
-  // Cart
-  cart: [],
-  addToCart: (product, quantity) => {
-    const cart = get().cart;
-    const existing = cart.find((item) => item.product.id === product.id);
-    if (existing) {
-      set({
-        cart: cart.map((item) =>
-          item.product.id === product.id
-            ? { ...item, quantity: item.quantity + quantity }
-            : item
-        ),
-      });
-    } else {
-      set({ cart: [...cart, { product, quantity }] });
-    }
-  },
-  removeFromCart: (productId) => {
-    set({ cart: get().cart.filter((item) => item.product.id !== productId) });
-  },
-  clearCart: () => set({ cart: [] }),
 
   // Settings
   settings: {},

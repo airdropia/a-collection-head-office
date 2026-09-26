@@ -6,9 +6,7 @@ import {
   Package,
   Bot,
   FileText,
-  Settings as SettingsIcon,
-  Megaphone,
-  Truck
+  Settings as SettingsIcon
 } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
@@ -18,16 +16,12 @@ import Inventory from './pages/Inventory'
 import Automation from './pages/Automation'
 import Reports from './pages/Reports'
 import SettingsPage from './pages/Settings'
-import ShareCenter from './pages/ShareCenter'
-import PurchaseTripsPage from './pages/PurchaseTrips'
 
 const tabs = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'catalog', label: 'Catalog', icon: BookOpen },
-  { id: 'share_center', label: 'Share Center', icon: Megaphone },
   { id: 'customers', label: 'Customers', icon: Users },
   { id: 'inventory', label: 'Inventory', icon: Package },
-  { id: 'purchase_trips', label: 'Trips', icon: Truck },
   { id: 'automation', label: 'Automation', icon: Bot },
   { id: 'reports', label: 'Reports', icon: FileText },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
@@ -43,11 +37,9 @@ function App() {
     switch (currentTab) {
       case 'dashboard': return <Dashboard />
       case 'catalog': return <Catalog />
-      case 'share_center': return <ShareCenter />
       case 'customers': return <Customers />
       case 'inventory': return <Inventory />
       case 'automation': return <Automation />
-      case 'purchase_trips': return <PurchaseTripsPage />
       case 'reports': return <Reports />
       case 'settings': return <SettingsPage />
       default: return <Dashboard />

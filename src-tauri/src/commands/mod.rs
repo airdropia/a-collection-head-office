@@ -17,8 +17,6 @@ pub mod customers_commands;
 pub mod reports_commands;
 pub mod settings_commands;
 pub mod backup_commands;
-pub mod share_segments_commands;
-pub mod purchase_trips_commands;
 pub mod sales_commands;
 pub mod udhar_commands;
 pub mod catalog_publish_commands;
@@ -72,15 +70,13 @@ pub use products_commands::{
     get_products, add_product, update_product, delete_product,
     export_products_csv, import_products_csv, upload_product_image,
     get_image_as_base64, save_base64_image, save_image_from_url,
-    save_image_for_share, save_drafts_to_folder_with_path,
-    mark_product_sold_out,
+    save_image_for_share, mark_product_sold_out,
 };
 pub use inventory_commands::{
     get_inventory_summary, get_low_stock, get_dead_stock, get_best_sellers, adjust_stock,
 };
 pub use customers_commands::{
     get_customers, add_customer, update_customer, delete_customer,
-    create_order, get_customer_history,
 };
 pub use reports_commands::{
     get_sales_report, get_inventory_report, get_customer_report,
@@ -89,15 +85,6 @@ pub use settings_commands::{get_settings, update_setting};
 pub use backup_commands::{
     backup_database_now, list_backups, restore_backup,
     import_from_catalog_json, init_database,
-};
-pub use share_segments_commands::{
-    log_share, get_share_logs,
-    get_customers_by_segment, update_customer_segment, get_customer_segments,
-    get_stale_products,
-};
-pub use purchase_trips_commands::{
-    get_purchase_trips, get_purchase_trip, create_purchase_trip,
-    update_purchase_trip, delete_purchase_trip, add_trip_item, remove_trip_item,
 };
 pub use sales_commands::{record_sale, undo_sale, reactivate_sold_product};
 pub use udhar_commands::{

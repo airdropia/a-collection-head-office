@@ -145,37 +145,9 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     // New tables for the profit-first operating system. Additive only —
     // no existing tables dropped, no existing data touched.
 
-    // --- purchase_trips: Faisalabad buying trips with landed cost ---
-    conn.execute("CREATE TABLE IF NOT EXISTS purchase_trips (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trip_code TEXT NOT NULL UNIQUE,
-        trip_date TEXT NOT NULL,
-        source_city TEXT NOT NULL DEFAULT 'Faisalabad',
-        supplier_notes TEXT,
-        travel_cost REAL NOT NULL DEFAULT 0.0,
-        transport_cost REAL NOT NULL DEFAULT 0.0,
-        food_cost REAL NOT NULL DEFAULT 0.0,
-        loading_cost REAL NOT NULL DEFAULT 0.0,
-        misc_cost REAL NOT NULL DEFAULT 0.0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    );", [])?;
-
-    // --- purchase_trip_items: items purchased on a trip, with cost allocation ---
-    conn.execute("CREATE TABLE IF NOT EXISTS purchase_trip_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trip_id INTEGER NOT NULL,
-        product_id INTEGER,
-        qty_purchased INTEGER NOT NULL DEFAULT 0,
-        unit_purchase_cost REAL NOT NULL DEFAULT 0.0,
-        total_purchase_cost REAL NOT NULL DEFAULT 0.0,
-        expense_allocation_amount REAL NOT NULL DEFAULT 0.0,
-        landed_unit_cost REAL NOT NULL DEFAULT 0.0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY(trip_id) REFERENCES purchase_trips(id) ON DELETE CASCADE,
-        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
-    );", [])?;
+// purchase_trips / purchase_trip_items CREATEs REMOVED in v0.38.0
+    // (feature removed; pi audit: 2 header-only trips, 0 items ever).
+    // Existing tables are dropped by the dead_tables list below.
 
     // --- agents: replaces locations concept (person + place unified) ---
     // One agent = one person at a place. Existing locations data is migrated
@@ -215,20 +187,8 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
     );", [])?;
 
-    // --- share_logs: social sharing audit trail ---
-    // platform enum: whatsapp_status | whatsapp_direct | facebook |
-    //                instagram | tiktok
-    conn.execute("CREATE TABLE IF NOT EXISTS share_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id INTEGER,
-        platform TEXT NOT NULL,
-        share_angle TEXT,
-        caption_text TEXT,
-        shared_by TEXT,
-        shared_at TEXT NOT NULL,
-        notes TEXT,
-        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
-    );", [])?;
+// share_logs CREATE REMOVED in v0.38.0 (Share Center removed;
+    // pi audit: 0 rows EVER). Existing table dropped by dead_tables list.
 
     // v0.16.0: catalog_publish_history — log of every publish operation.
     // Useful for debugging and showing "last published" status in UI.
@@ -418,14 +378,6 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
          ON products(status, stock_quantity)",
         [],
     )?;
-    // share_logs is queried by product_id + sorted by shared_at for "Last
-    // promoted date" feature (planned) and stale stock analysis.
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_share_logs_product_date
-         ON share_logs(product_id, shared_at DESC)",
-        [],
-    )?;
-
     // v0.12.6: Clean up duplicate agents (same name, different agent_code)
     // that were created before the name-check fix in sync_locations_to_agents.
     cleanup_duplicate_agents(conn)?;
@@ -454,6 +406,11 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         "ai_logs",
         "ai_knowledge",
         "social_posts",
+        // v0.38.0 — Share Center + Purchase Trips removed (owner verdict,
+        // pi audit 2026-09-26: share_logs 0 rows ever, trips 0 items):
+        "share_logs",
+        "purchase_trips",
+        "purchase_trip_items",
     ];
     for table in &dead_tables {
         let _ = conn.execute(&format!("DROP TABLE IF EXISTS {}", table), []);

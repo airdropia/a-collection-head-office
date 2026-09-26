@@ -11,7 +11,6 @@ pub mod catalog_publish;
 pub mod inventory;
 pub mod customers;
 pub mod reports;
-pub mod purchase_trips;
 pub mod automation;
 pub mod utils;
 pub mod commands;
@@ -49,7 +48,6 @@ pub fn run() {
             commands::products_commands::save_base64_image,
             commands::products_commands::save_image_from_url,
             commands::products_commands::save_image_for_share,
-            commands::products_commands::save_drafts_to_folder_with_path,
             // v0.33.0 — Manual sold-out marking
             commands::products_commands::mark_product_sold_out,
             commands::backup_commands::list_backups,
@@ -64,8 +62,9 @@ pub fn run() {
             commands::customers_commands::add_customer,
             commands::customers_commands::update_customer,
             commands::customers_commands::delete_customer,
-            commands::customers_commands::create_order,
-            commands::customers_commands::get_customer_history,
+//            create_order/get_customer_history REMOVED v0.38.0 (legacy cart
+//            path — decremented stock WITHOUT a sales row; root cause of
+//            stale stock data. record_sale is the only sales path now.)
             // v0.35.0 — Phase B: balance recompute (auto-heal support)
             commands::customers_commands::recompute_customer_balances,
             commands::reports_commands::get_sales_report,
@@ -75,21 +74,10 @@ pub fn run() {
             commands::settings_commands::update_setting,
             commands::backup_commands::backup_database_now,
             commands::backup_commands::init_database,
-            // v0.11.1 — Share Center
-            commands::share_segments_commands::log_share,
-            commands::share_segments_commands::get_share_logs,
-            commands::share_segments_commands::get_customers_by_segment,
-            commands::share_segments_commands::update_customer_segment,
-            commands::share_segments_commands::get_customer_segments,
-            commands::share_segments_commands::get_stale_products,
-            // v0.11.2 — Purchase Trips
-            commands::purchase_trips_commands::get_purchase_trips,
-            commands::purchase_trips_commands::get_purchase_trip,
-            commands::purchase_trips_commands::create_purchase_trip,
-            commands::purchase_trips_commands::update_purchase_trip,
-            commands::purchase_trips_commands::delete_purchase_trip,
-            commands::purchase_trips_commands::add_trip_item,
-            commands::purchase_trips_commands::remove_trip_item,
+            // v0.11.1 — Share Center: REMOVED in v0.38.0 (pi audit: share_logs
+            // 0 rows EVER; owner verdict — dead feature)
+            // v0.11.2 — Purchase Trips: REMOVED in v0.38.0 (pi audit: 2 header-only
+            // trips, 0 items ever; owner verdict — dead feature)
             // v0.12.5 — Sales
             commands::sales_commands::record_sale,
             // v0.30.0 — Sale undo + sold items reactivation

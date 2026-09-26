@@ -5,9 +5,8 @@
 
 use crate::catalog::{self, Product};
 use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, BestSellerItem};
-use crate::customers::{self, Customer, OrderItemInput, OrderHistory};
+use crate::customers::{self, Customer};
 use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
-use crate::purchase_trips::{self, PurchaseTripSummary};
 use crate::utils;
 use crate::commands::{DbState, set_setting_val, get_setting_val};
 use tauri::async_runtime::Mutex;

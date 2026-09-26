@@ -1,9 +1,9 @@
 # A Collection Head Office
 
 Tauri 2 desktop app (React + TypeScript + Rust/SQLite) — cloth business head
-office management: catalog, customers/khata, agents, trips, reports.
+office management: catalog, customers/khata, sales, reports.
 
-## For AI agents operating this app
+## For external agents operating this app
 
 Read `AGENTS.md` first (local machine policy: edit-only, builds via GitHub
 Actions). Key facts:
@@ -21,23 +21,26 @@ Actions). Key facts:
   owes HO (udhar, green). `< 0` = HO owes customer (advance/maal wapas, red,
   since v0.34.0). Ledger invariants: `opening_debit` must be positive,
   `adjustment` may be signed, `payment` rows only via `record_customer_payment`.
-- **agent-friendly UI convention (v0.34.0+)**: interactive elements keep
+- **Agent-friendly UI convention (v0.34.0+)**: interactive elements keep
   meaningful visible text (button titles, badges like `Udhar:` / `Dene hain:`)
-  so UIA/accessibility-tree tools (e.g. lvt) can locate and drive them.
+  so UIA/accessibility-tree tools can locate and drive them.
 
 ## Features
 
-- **Dashboard** — Profit-mode overview: stock distribution, agent balances,
-  customer khata net (red/green), stale stock alerts, recent shares
-- **Catalog** — Product master, profit-mode columns, SOLD badges
-- **Share Center** — Aggressive social media: share pack generator, WhatsApp
-  broadcast, stale stock detector, share history
-- **Agents** — Stock + cash ledger, outstanding balance tracking
-- **Purchase Trips** — Proportional expense allocation, landed unit cost
-- **Customers** — Profiles, khata ledger (udhar/advance both directions), orders
+- **Dashboard** — Stock overview, customer khata net (red/green), quick actions
+- **Catalog** — Product master, profit columns, SOLD badges, catalog publishing
+- **Customers** — Profiles, khata ledger (udhar/advance both directions), payments
+- **Sales** — Sale recording with stock sync (via Catalog), undo, sold-item reactivation
 - **Inventory** — Stock tracking, low stock alerts, best sellers
-- **Automation** — Scheduled backup, weekly report generation
-- **AI Assistant** — Provider-agnostic business chat (Gemini/OpenAI/Claude/Ollama)
+- **Reports** — Sales / inventory / customer reports
+- **Automation** — Scheduled daily backup (DB + full ZIP)
+- **Settings** — Backup path, catalog repo/brand/WhatsApp publish config
+
+> v0.36.0–v0.38.0 grand cleanup: Agents system, AI Workspace/Assistant,
+> Share Center, Purchase Trips, and the legacy cart/order flow were REMOVED
+> (owner verdicts; pi usage audit 2026-09-26: all zero-usage features).
+> Accounting data was preserved — historical agent sales remain undoable,
+> dead tables are dropped automatically on app start.
 
 ## Tech Stack
 
@@ -47,7 +50,6 @@ Actions). Key facts:
 | Desktop | Tauri 2 |
 | Backend | Rust (tokio, rusqlite, reqwest, image, csv) |
 | Database | SQLite (embedded, local-first) |
-| AI | Provider-agnostic |
 
 ## Development (owner only — CI does the builds)
 
