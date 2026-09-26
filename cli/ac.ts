@@ -406,7 +406,7 @@ function dbHealth() {
 
 function dashboard() {
   const custNet = (db.query(`
-    SELECT (${CUSTOMER_OUTSTANDING_SQL}) AS net FROM customer_payments`).get() as any)?.net ?? 0;
+    SELECT COALESCE(SUM(${CUSTOMER_OUTSTANDING_SQL}), 0.0) AS net FROM customers c`).get() as any)?.net ?? 0;
   const agentNet = (db.query(`
     SELECT ${AGENT_OUTSTANDING_SQL} AS net FROM agent_ledger_entries`).get() as any)?.net ?? 0;
   const lowStock = (db.query(`
