@@ -15,7 +15,6 @@ pub mod products_commands;
 pub mod inventory_commands;
 pub mod customers_commands;
 pub mod reports_commands;
-pub mod ai_commands;
 pub mod settings_commands;
 pub mod backup_commands;
 pub mod share_segments_commands;
@@ -85,10 +84,6 @@ pub use customers_commands::{
 };
 pub use reports_commands::{
     get_sales_report, get_inventory_report, get_customer_report,
-};
-pub use ai_commands::{
-    ask_ai, save_product_draft_to_catalog, save_catalog_draft,
-    generate_social_post, generate_marketing, save_knowledge,
 };
 pub use settings_commands::{get_settings, update_setting};
 pub use backup_commands::{

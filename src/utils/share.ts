@@ -1,7 +1,6 @@
 /**
- * Social sharing utility — extracted from SocialHub.tsx so it can be reused
- * by Catalog.tsx, ProductDraftCard, and any other component that needs to
- * share product content to social platforms.
+ * Social sharing utility — reusable helper used by Catalog.tsx and
+ * ShareCenter.tsx to share product content to social platforms.
  *
  * All sharing is done via platform-specific share URLs (no API keys, no OAuth).
  * - WhatsApp: wa.me/?text=... (works on web + mobile, opens WhatsApp app)

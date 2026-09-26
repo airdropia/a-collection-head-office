@@ -12,8 +12,6 @@ pub mod inventory;
 pub mod customers;
 pub mod reports;
 pub mod purchase_trips;
-pub mod adapters;
-pub mod ai;
 pub mod automation;
 pub mod utils;
 pub mod commands;
@@ -73,15 +71,9 @@ pub fn run() {
             commands::reports_commands::get_sales_report,
             commands::reports_commands::get_inventory_report,
             commands::reports_commands::get_customer_report,
-            commands::ai_commands::ask_ai,
             commands::settings_commands::get_settings,
             commands::settings_commands::update_setting,
             commands::backup_commands::backup_database_now,
-            commands::ai_commands::save_knowledge,
-            commands::ai_commands::save_product_draft_to_catalog,
-            commands::ai_commands::save_catalog_draft,
-            commands::ai_commands::generate_social_post,
-            commands::ai_commands::generate_marketing,
             commands::backup_commands::init_database,
             // v0.11.1 — Share Center
             commands::share_segments_commands::log_share,

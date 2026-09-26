@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAppStore } from '../stores/store'
 import { open } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
-import { Shield, Key, Server, HardDrive, RefreshCw, Globe, History } from 'lucide-react'
+import { Shield, Key, HardDrive, RefreshCw, Globe, History } from 'lucide-react'
 
 export default function Settings() {
   const {
@@ -12,10 +12,6 @@ export default function Settings() {
     backupDatabaseNow
   } = useAppStore()
 
-  const [aiProvider, setAiProvider] = useState('gemini')
-  const [apiKey, setApiKey] = useState('')
-  const [aiModel, setAiModel] = useState('')
-  const [aiBaseUrl, setAiBaseUrl] = useState('')
   const [backupPath, setBackupPath] = useState('')
   const [backupInterval, setBackupInterval] = useState('7')
   const [backupResult, setBackupResult] = useState('')
@@ -50,10 +46,6 @@ export default function Settings() {
   }
 
   useEffect(() => {
-    if (settings.ai_provider) setAiProvider(settings.ai_provider)
-    if (settings.ai_api_key) setApiKey(settings.ai_api_key)
-    if (settings.ai_model) setAiModel(settings.ai_model)
-    if (settings.ai_base_url) setAiBaseUrl(settings.ai_base_url)
     if (settings.backup_path) setBackupPath(settings.backup_path)
     if (settings.backup_interval_days) setBackupInterval(settings.backup_interval_days)
     // v0.15.0: Load catalog settings
@@ -62,18 +54,6 @@ export default function Settings() {
     if (settings.catalog_whatsapp) setCatalogWhatsapp(settings.catalog_whatsapp)
     if (settings.catalog_github_token) setCatalogGithubToken(settings.catalog_github_token)
   }, [settings])
-
-  const handleSaveAiSettings = async () => {
-    try {
-      await updateSetting('ai_provider', aiProvider)
-      await updateSetting('ai_api_key', apiKey)
-      await updateSetting('ai_model', aiModel)
-      await updateSetting('ai_base_url', aiBaseUrl)
-      alert('AI settings saved successfully!')
-    } catch (err) {
-      alert(`Failed to save AI settings: ${err}`)
-    }
-  }
 
   const handleSelectBackupPath = async () => {
     try {
@@ -188,87 +168,11 @@ export default function Settings() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold tracking-tight text-white font-display">Settings</h1>
-        <p className="text-sm text-gray-400 mt-1">Configure AI provider, backup preferences, and system options.</p>
+        <p className="text-sm text-gray-400 mt-1">Configure backups, catalog publishing, and system options.</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* AI Configuration */}
-        <div className="glass-card p-5 space-y-4">
-          <h2 className="text-lg font-semibold text-white flex items-center">
-            <Server className="mr-2 text-violet-500" size={20} /> AI Provider Settings
-          </h2>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">AI Provider</label>
-            <select
-              value={aiProvider}
-              onChange={(e) => setAiProvider(e.target.value)}
-              className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
-            >
-              <option value="gemini">Gemini (Google)</option>
-              <option value="openai">OpenAI</option>
-              <option value="claude">Claude (Anthropic)</option>
-              <option value="local">Local LLM (Ollama)</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">API Key</label>
-            <div className="relative">
-              <Key className="absolute left-3 top-2.5 text-gray-500" size={16} />
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="Enter your API key..."
-                className="w-full bg-slate-950 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
-              />
-            </div>
-            <p className="text-[10px] text-gray-600 mt-1">Stored securely in local database.</p>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Model Name</label>
-            <input
-              type="text"
-              value={aiModel}
-              onChange={(e) => setAiModel(e.target.value)}
-              placeholder="E.g. gemini-2.5-flash, gpt-4o"
-              className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
-            />
-          </div>
-
-          {/* v0.25.4: Base URL for OpenAI-compatible providers.
-              Only shown when provider is "openai" — Gemini/Claude have
-              their own fixed endpoints. OpenAI-compatible providers
-              (OpenRouter, Together, Groq, local LM Studio, etc.) need
-              a custom endpoint URL. Leave empty for official OpenAI API. */}
-          {aiProvider === 'openai' && (
-            <div>
-              <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">
-                API Base URL <span className="text-gray-600 normal-case font-normal">(optional — for OpenAI-compatible providers)</span>
-              </label>
-              <input
-                type="text"
-                value={aiBaseUrl}
-                onChange={(e) => setAiBaseUrl(e.target.value)}
-                placeholder="https://api.openai.com/v1 (leave empty for default)"
-                className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
-              />
-              <p className="text-[10px] text-gray-600 mt-1">
-                For OpenRouter: https://openrouter.ai/api/v1 · For Groq: https://api.groq.com/openai/v1 ·
-                Leave empty for official OpenAI.
-              </p>
-            </div>
-          )}
-
-          <button
-            onClick={handleSaveAiSettings}
-            className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            Save AI Settings
-          </button>
-        </div>
+        {/* AI Provider Settings — REMOVED in v0.37.0 (AI system removed) */}
 
         {/* Backup Configuration */}
         <div className="glass-card p-5 space-y-4">

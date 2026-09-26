@@ -48,13 +48,6 @@ export default function Automation() {
           },
           {
             id: 2,
-            name: "Weekly Performance Report",
-            schedule_type: "Weekly",
-            last_run: allSettings.last_run_weekly_report || "Never",
-            active: true
-          },
-          {
-            id: 3,
             name: "Low Stock Reminder",
             schedule_type: "Daily (Auto)",
             last_run: "System Idle",

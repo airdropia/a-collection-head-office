@@ -5,7 +5,7 @@ import { useAppStore } from '../stores/store'
 import { fmtMoney } from '../utils/format'
 import {
   Share2, MessageCircle, Facebook, Instagram, Copy, Check,
-  AlertTriangle, RefreshCw, Sparkle, Send, Save, Trash2, Brain,
+  AlertTriangle, RefreshCw, Send, Save, Trash2,
   Edit3, Hash, Image as ImageIcon, FolderDown
 } from 'lucide-react'
 import {
@@ -87,9 +87,6 @@ export default function ShareCenter() {
   const { products, fetchProducts, updateSetting } = useAppStore()
   const [selectedProductId, setSelectedProductId] = useState<number | ''>('')
   const [shareAngle, setShareAngle] = useState<ShareAngle>('new_arrival')
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [generatingPlatform, setGeneratingPlatform] = useState<string | null>(null)
-
   // Caption state — editable per platform
   const [captions, setCaptions] = useState<Record<string, string>>({})
   const [editingPlatform, setEditingPlatform] = useState<string | null>(null)
@@ -177,186 +174,12 @@ export default function ShareCenter() {
     }
   }
 
-  // === AI CAPTION GENERATION ===
+  // === AI CAPTION GENERATION — REMOVED in v0.37.0 (AI system removed).
+  // Captions are now written manually (or loaded from drafts) and remain
+  // fully editable below. ===
 
   const selectedProduct = products.find(p => p.id === selectedProductId)
 
-  const handleGenerateCaption = async (platformId: string) => {
-    if (!selectedProductId) {
-      alert('Please select a product first.')
-      return
-    }
-    const product = selectedProduct!
-    setIsGenerating(true)
-    setGeneratingPlatform(platformId)
-
-    const angleText: Record<ShareAngle, string> = {
-      new_arrival: 'NEW ARRIVAL — freshness, pehle hi haath lago!',
-      discount: 'DISCOUNT — price drop, urgency, limited time!',
-      premium: 'PREMIUM — quality, luxury, exclusivity!',
-      budget: 'BUDGET-FRIENDLY — value for money, affordability!',
-      limited_stock: 'LIMITED STOCK — scarcity, abhi kharid lo!',
-    }
-
-    const retailPrice = (product as any).retail_price?.toFixed(0) || (product.sale_price * 1.2).toFixed(0)
-    const saveAmount = (parseFloat(retailPrice) - product.sale_price).toFixed(0)
-    // Only show crossed-out retail + save amount if retail > sale (otherwise Save Rs. 0 looks bad)
-    const hasDiscount = parseFloat(retailPrice) > product.sale_price
-    const priceBlock = hasDiscount
-      ? `🔥 SALE Rs. ${product.sale_price.toFixed(0)}\n~~Retail Rs. ${retailPrice}~~\nSave Rs. ${saveAmount}!`
-      : `🔥 PRICE Rs. ${product.sale_price.toFixed(0)}`
-
-    const platformPrompts: Record<string, string> = {
-      'whatsapp_status': `Short WhatsApp Status (2-3 lines). PRICE FIRST at top:
-${priceBlock}
-Then 2 lines warm+urgent. One Punjabi phrase if natural. End with 'WhatsApp karein!'`,
-      'whatsapp_direct': `2 line punchy pitch. Price first line: ${priceBlock.split('\n')[0]}. 'Abhi DM karein!'`,
-      'facebook': `Facebook post (3-5 lines). PRICE BLOCK at top:
-${priceBlock}
-Then emotional content. Address 'Girls ❤️' or 'Ladies ❤️'. Include #NarowalFashion #Zafarwal #Shakargarh. Emojis.`,
-      'instagram': `Instagram caption (3-5 lines). PRICE BLOCK first:
-${priceBlock}
-Then trendy+emotional. Line breaks. 5-8 hashtags: #NarowalFashion #NarowalLawn #Zafarwal #Shakargarh #instafashion`,
-      'tiktok': `TikTok caption (2-3 lines). Price first: ${priceBlock.split('\n')[0]}. Hook-driven. MUST include #fyp #foryou #NarowalFashion #Zafarwal.`,
-    }
-
-    const prompt = `${angleText[shareAngle]}
-
-Product: ${product.name} (${product.sku})
-Category: ${product.category || 'Clothing'}
-Sale Price: Rs. ${product.sale_price.toFixed(0)}
-Retail Price: Rs. ${retailPrice}
-Description: ${product.description || ''}
-
-RULES: Price at top. Hinglish. Warm+emotional tone. One Punjabi phrase max. No 'Elegant/Beautiful/Premium' generic words. Target: Narowal women/girls 10-50.
-
-${platformPrompts[platformId]}
-
-Return ONLY the post text.`
-
-    try {
-      const response: any = await invoke('ask_ai', { prompt })
-      const text = response.text || response || ''
-      setCaptions(prev => ({ ...prev, [platformId]: text }))
-    } catch (err) {
-      alert(`AI Generation failed: ${err}`)
-    } finally {
-      setIsGenerating(false)
-      setGeneratingPlatform(null)
-    }
-  }
-
-  const handleGenerateAll = async () => {
-    if (!selectedProductId) {
-      alert('Please select a product first.')
-      return
-    }
-    const product = selectedProduct!
-    setIsGenerating(true)
-    setGeneratingPlatform('all')
-
-    const angleText: Record<ShareAngle, string> = {
-      new_arrival: 'This is a NEW ARRIVAL — emphasize freshness and being the first to get it.',
-      discount: 'This is a DISCOUNT post — emphasize the price drop and urgency.',
-      premium: 'This is a PREMIUM product — emphasize quality, luxury, and exclusivity.',
-      budget: 'This is a BUDGET-FRIENDLY pick — emphasize value for money and affordability.',
-      limited_stock: 'This is a LIMITED STOCK alert — emphasize scarcity and urgency to buy now.',
-    }
-
-    // v0.13.2: SINGLE API call with JSON output — saves 4 API calls
-    // (was 5 sequential calls, now just 1). Faster for user + saves quota.
-    const prompt = `${angleText[shareAngle]}
-
-Product Details:
-- Name: ${product.name}
-- SKU: ${product.sku}
-- Category: ${product.category || 'Clothing'}
-- Sale Price: Rs. ${product.sale_price.toFixed(0)}
-- Retail Price: Rs. ${(product as any).retail_price?.toFixed(0) || (product.sale_price * 1.2).toFixed(0)}
-- Description: ${product.description || 'Premium quality'}
-- Tags: ${product.tags || ''}
-
-CRITICAL MARKETING RULES — APPLY TO ALL PLATFORMS:
-1. PRICE FIRST: Every caption MUST start with the sale price at the very top. Format:
-   🔥 SALE Rs. ${product.sale_price.toFixed(0)}
-   ~~Retail Rs. ${(product as any).retail_price?.toFixed(0) || (product.sale_price * 1.2).toFixed(0)}~~
-   Save Rs. ${(((product as any).retail_price || (product.sale_price * 1.2)) - product.sale_price).toFixed(0)}!
-   Then continue with marketing content below the price block.
-2. EMOTIONAL TONE: Warm, exciting, friendly. Write like a local ladies clothing seller.
-   Use openers like 'Girls ❤️' or 'Ladies ❤️' or 'Beautiful Girls ❤️' when appropriate.
-3. LOCAL PUNJABI FLAVOR: Use ONE short Roman Punjabi phrase per post (max). Examples:
-   'Raulay pe gaye je!' / 'Hun gal ban gayi!' / 'Oye hoye, ki gal ae!'
-   Only when it naturally fits. Do NOT force into every post.
-4. FORBIDDEN WORDS: Never use 'Elegant', 'Beautiful', 'Premium quality' as generic descriptors.
-5. HINGLISH ONLY: Roman Urdu + English. Never pure English or Urdu script.
-6. LOCAL HASHTAGS: Always include #NarowalFashion #NarowalLawn #Zafarwal #Shakargarh
-7. AGGRESSIVE & PERSUASIVE: Create urgency, FOMO, excitement. Make them want to buy NOW.
-8. TARGET: Narowal district women/girls age 10-50 (rural + urban)
-
-Generate marketing content for ALL 5 platforms in ONE response. Return ONLY valid JSON:
-
-{
-  "whatsapp_status": "Start with price block. Then 2-3 lines warm+urgent. One Punjabi phrase if natural. 1-2 emojis. End with 'WhatsApp karein order ke liye!'",
-  "whatsapp_direct": "Price first line. Then 1 line punchy pitch. 'Abhi DM karein!' ",
-  "facebook": "Price block at top. Then 3-5 lines emotional+persuasive. Address 'Girls ❤️' or 'Ladies ❤️'. Include #NarowalFashion #Zafarwal #Shakargarh. Emojis.",
-  "instagram": "Price block first. Then 3-5 lines trendy+emotional. Line breaks. 5-8 hashtags: #NarowalFashion #NarowalLawn #Zafarwal #Shakargarh #instafashion",
-  "tiktok": "Price first. Then 2-3 lines hook-driven. MUST include #fyp #foryou #NarowalFashion #Zafarwal.",
-  "hashtags": ["#NarowalFashion", "#NarowalLawn", "#Zafarwal", "#Shakargarh", "#fyp"],
-  "cta": "Short aggressive Hinglish call-to-action"
-}
-
-Write in Hinglish. Return ONLY the JSON.`
-
-    try {
-      const response: any = await invoke('ask_ai', { prompt })
-      const text = response.text || response || ''
-
-      // Parse JSON from response (AI may wrap in markdown or add text)
-      let jsonStr = text.trim()
-      // Remove markdown code block if present
-      if (jsonStr.includes('```')) {
-        const start = jsonStr.indexOf('{')
-        const end = jsonStr.lastIndexOf('}')
-        if (start !== -1 && end !== -1) {
-          jsonStr = jsonStr.substring(start, end + 1)
-        }
-      } else {
-        const start = jsonStr.indexOf('{')
-        const end = jsonStr.lastIndexOf('}')
-        if (start !== -1 && end !== -1) {
-          jsonStr = jsonStr.substring(start, end + 1)
-        }
-      }
-
-      try {
-        const parsed = JSON.parse(jsonStr)
-        setCaptions({
-          'whatsapp_status': parsed.whatsapp_status || '',
-          'whatsapp_direct': parsed.whatsapp_direct || '',
-          'facebook': parsed.facebook || '',
-          'instagram': parsed.instagram || '',
-          'tiktok': parsed.tiktok || '',
-        })
-        // Store hashtags + CTA for later use (e.g., Copy All)
-        if (parsed.hashtags) {
-          setCaptions(prev => ({ ...prev, '_hashtags': Array.isArray(parsed.hashtags) ? parsed.hashtags.join(' ') : '' }))
-        }
-        if (parsed.cta) {
-          setCaptions(prev => ({ ...prev, '_cta': parsed.cta }))
-        }
-      } catch (parseErr) {
-        // JSON parse failed — fallback: put raw text in all platforms
-        console.error('JSON parse failed:', parseErr)
-        alert('AI returned non-JSON response. Try again or generate per-platform.')
-        setCaptions({ 'whatsapp_status': text })
-      }
-    } catch (err) {
-      alert(`AI Generation failed: ${err}`)
-    } finally {
-      setIsGenerating(false)
-      setGeneratingPlatform(null)
-    }
-  }
 
   // === CAPTION EDITING ===
 
@@ -537,26 +360,6 @@ Write in Hinglish. Return ONLY the JSON.`
     setActiveTab('share_pack')
   }
 
-  // === TEACH AI ===
-
-  const handleTeachAI = async () => {
-    const allCaptions = Object.values(captions).filter(c => c && c.trim()).join('\n\n---\n\n')
-    if (!allCaptions) {
-      alert('No captions to teach.')
-      return
-    }
-    try {
-      await invoke('save_knowledge', {
-        topic: `Post Style - ${selectedProduct?.name || 'General'}`,
-        content: allCaptions,
-        source: 'share-center',
-      })
-      alert('Saved to AI Knowledge! The AI will learn from this style in future.')
-    } catch (err) {
-      alert(`Failed to save: ${err}`)
-    }
-  }
-
   // === BULK BROADCAST ===
 
   const handleBulkBroadcast = async () => {
@@ -608,13 +411,13 @@ Write in Hinglish. Return ONLY the JSON.`
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold tracking-tight text-white font-display">Share Center</h1>
-        <p className="text-sm text-gray-400 mt-1">AI-powered marketing. Generate, edit, save, share — all in one place.</p>
+        <p className="text-sm text-gray-400 mt-1">Write, edit, save, share — captions, broadcasts and share logs in one place.</p>
       </div>
 
       {/* Tab switcher */}
       <div className="flex space-x-1 bg-slate-900/50 p-1 rounded-lg border border-gray-800 w-fit overflow-x-auto">
         {[
-          { id: 'share_pack', label: 'AI Share Pack', icon: Sparkle },
+          { id: 'share_pack', label: 'Share Pack', icon: Share2 },
           { id: 'drafts', label: `Drafts (${drafts.length})`, icon: Save },
           { id: 'broadcast', label: 'Bulk Broadcast', icon: Send },
           { id: 'stale', label: `Stale (${staleProducts.length})`, icon: AlertTriangle },
@@ -633,7 +436,7 @@ Write in Hinglish. Return ONLY the JSON.`
         ))}
       </div>
 
-      {/* === AI SHARE PACK TAB === */}
+      {/* === SHARE PACK TAB === */}
       {activeTab === 'share_pack' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left: product + angle picker */}
@@ -703,14 +506,6 @@ Write in Hinglish. Return ONLY the JSON.`
                 ))}
               </div>
             </div>
-            <button
-              onClick={handleGenerateAll}
-              disabled={!selectedProductId || isGenerating}
-              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
-            >
-              <Sparkle size={14} />
-              <span>{isGenerating ? 'AI Generating (1 call)...' : 'Generate All (AI — 1 call)'}</span>
-            </button>
             <div className="flex space-x-2">
               <button
                 onClick={handleSaveDraft}
@@ -735,28 +530,16 @@ Write in Hinglish. Return ONLY the JSON.`
                 {copiedPlatform === 'all' ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
                 <span>{copiedPlatform === 'all' ? 'Copied!' : 'Copy All'}</span>
               </button>
-              <button
-                onClick={handleTeachAI}
-                disabled={Object.keys(captions).length === 0}
-                className="flex-1 flex items-center justify-center space-x-1 px-3 py-2 bg-amber-600/20 hover:bg-amber-600/40 disabled:opacity-50 text-amber-300 rounded-lg text-xs font-medium"
-              >
-                <Brain size={12} /><span>Teach AI</span>
-              </button>
-            </div>
-            {/* Teach AI clarification */}
-            <div className="bg-slate-950/50 border border-gray-800 rounded-lg p-2 text-[10px] text-gray-500">
-              <strong className="text-amber-400">Teach AI</strong> saves captions to local SQLite database (ai_knowledge table). AI reads these on future calls — no cloud dependency.
             </div>
           </div>
 
           {/* Right: generated captions (editable) */}
           <div className="lg:col-span-2 glass-card p-5 space-y-3">
-            <h2 className="text-lg font-semibold text-white">2. AI-Generated Captions</h2>
-            <p className="text-xs text-gray-400">Each caption is AI-generated for the specific platform. Click Generate per platform or "Generate All". Edit any caption before sharing.</p>
+            <h2 className="text-lg font-semibold text-white">2. Captions</h2>
+            <p className="text-xs text-gray-400">Write each caption for the specific platform (or load a saved draft). Edit before sharing.</p>
             {PLATFORMS.map(p => {
               const caption = captions[p.id]
               const isEditing = editingPlatform === p.id
-              const isThisGenerating = generatingPlatform === p.id
               const Icon = p.icon
               return (
                 <div key={p.id} className="bg-slate-950/50 border border-gray-800 rounded-lg p-3 space-y-2">
@@ -767,14 +550,6 @@ Write in Hinglish. Return ONLY the JSON.`
                       {caption && <Check size={10} className="text-emerald-400" />}
                     </div>
                     <div className="flex items-center space-x-1">
-                      <button
-                        onClick={() => handleGenerateCaption(p.id)}
-                        disabled={isGenerating || !selectedProductId}
-                        className="flex items-center space-x-1 px-2 py-0.5 bg-violet-600/20 hover:bg-violet-600/40 disabled:opacity-30 text-violet-300 rounded text-[10px] font-medium"
-                      >
-                        <Sparkle size={8} />
-                        <span>{isThisGenerating ? '...' : 'AI'}</span>
-                      </button>
                       {caption && (
                         <>
                           <button onClick={() => handleCopyCaption(p.id)} className="p-1 text-gray-500 hover:text-violet-400" title="Copy">
@@ -826,7 +601,7 @@ Write in Hinglish. Return ONLY the JSON.`
                       </div>
                     )
                   ) : (
-                    <p className="text-xs text-gray-600 italic py-2">Not generated yet. Click "AI" to generate.</p>
+                    <p className="text-xs text-gray-600 italic py-2">No caption yet. Write one using the edit (pencil) button.</p>
                   )}
                 </div>
               )
@@ -968,8 +743,8 @@ Write in Hinglish. Return ONLY the JSON.`
                     }}
                     className="mt-2 w-full flex items-center justify-center space-x-1 px-2 py-1 bg-violet-600/20 hover:bg-violet-600/40 text-violet-300 rounded text-[10px] font-medium"
                   >
-                    <Sparkle size={10} />
-                    <span>Generate Captions</span>
+                    <Share2 size={10} />
+                    <span>Open Share Pack</span>
                   </button>
                 </div>
               ))}
@@ -989,7 +764,7 @@ Write in Hinglish. Return ONLY the JSON.`
           </div>
           {shareLogs.length === 0 ? (
             <div className="glass-card p-8 text-center text-gray-500 text-sm">
-              No shares logged yet. Use AI Share Pack to generate and share.
+              No shares logged yet. Use Share Pack to write captions and share.
             </div>
           ) : (
             <div className="glass-card overflow-hidden">

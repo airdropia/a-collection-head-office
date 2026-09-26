@@ -40,25 +40,8 @@ fn run_due_automations(conn: &Connection, db_path: &Path, app_handle: &tauri::Ap
         }
     }
 
-    // 2. Weekly Performance Report check
-    if is_automation_due(conn, "Weekly Performance Report", 7)? {
-        if let Ok(backup_path) = get_setting(conn, "backup_path") {
-            if !backup_path.is_empty() {
-                let backup_dir = Path::new(&backup_path);
-                if backup_dir.exists() {
-                    let timestamp = chrono::Local::now().format("%Y%m%d").to_string();
-                    let dest = backup_dir.join(format!("weekly_report_{}.txt", timestamp));
-
-                    // Generate a quick text report
-                    if let Ok(report_text) = compile_weekly_summary(conn) {
-                        fs::write(dest, report_text).map_err(|e| e.to_string())?;
-                        update_automation_last_run(conn, "Weekly Performance Report")?;
-                        let _ = app_handle.emit("automation-run", "Weekly Performance Report Created");
-                    }
-                }
-            }
-        }
-    }
+    // 2. Weekly Performance Report — REMOVED in v0.37.0 (AI cleanup).
+    //    It read the dead orders table and depended on the AI business profile.
 
     Ok(())
 }
@@ -169,50 +152,3 @@ fn update_automation_last_run(conn: &Connection, name: &str) -> Result<(), Strin
     Ok(())
 }
 
-fn compile_weekly_summary(conn: &Connection) -> Result<String, String> {
-    let last_week = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
-
-    let (total_orders, sales, profit): (i64, f64, f64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(total_amount), 0.0), COALESCE(SUM(profit), 0.0)
-         FROM orders WHERE order_date >= ?1",
-        [&last_week],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).map_err(|e| e.to_string())?;
-
-    let low_stock_count: i64 = conn.query_row(
-        // v0.35.0: split-columns rule (HO + agents stock), legacy fallback kept
-        "SELECT COUNT(*) FROM products WHERE (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= 5 AND COALESCE(profit_status, 'in_head_office') != 'sold_out' AND status = 'active'",
-        [],
-        |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-
-    // Read currency from business_profile. Reuse the existing public getter
-    // so the weekly report uses the same currency as the AI business context.
-    // Previously hardcoded as "${:.2}" which was incorrect for PKR business.
-    let currency = {
-        let profile = crate::ai::get_business_profile(conn).unwrap_or_default();
-        profile["currency"].as_str().unwrap_or("PKR").to_string()
-    };
-
-    let report = format!(
-        "=========================================\n\
-         WEEKLY BUSINESS SUMMARY REPORT\n\
-         Date: {}\n\
-         =========================================\n\n\
-         Sales Activity (Last 7 Days):\n\
-         - Total Orders: {}\n\
-         - Gross Sales: {}\n\
-         - Total Profit: {}\n\n\
-         Inventory Health:\n\
-         - Low Stock Items: {}\n\n\
-         Generated automatically by A Collection Head Office Operating System.\n\
-         =========================================",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
-        total_orders,
-        crate::utils::format_money(sales, &currency),
-        crate::utils::format_money(profit, &currency),
-        low_stock_count
-    );
-
-    Ok(report)
-}

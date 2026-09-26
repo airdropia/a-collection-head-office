@@ -8,8 +8,6 @@ use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, Best
 use crate::customers::{self, Customer, OrderItemInput, OrderHistory};
 use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
 use crate::purchase_trips::{self, PurchaseTripSummary};
-use crate::adapters::duckduckgo::{self, WebEvidence};
-use crate::ai::{self, AiResponse};
 use crate::utils;
 use crate::commands::{DbState, set_setting_val, get_setting_val};
 use tauri::async_runtime::Mutex;
@@ -32,8 +30,8 @@ use tauri::State;
 /// v0.15.2: Critical — must acquire DB lock, read settings + products, then
 /// RELEASE the lock before doing any async work. rusqlite::Connection is not
 /// Send, so holding the Mutex across .await causes "future cannot be sent
-/// between threads safely" compile error. This pattern: lock → read → drop →
-/// process is the same one used by ask_ai (search ask_ai in commands/mod.rs).
+/// between threads safely" compile error. Standard pattern: lock → read →
+/// drop → then await.
 #[tauri::command]
 pub async fn preview_catalog_publish(
     state: State<'_, DbState>,

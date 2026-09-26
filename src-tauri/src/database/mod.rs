@@ -94,34 +94,13 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
     );", [])?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS social_posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER,
-        platform TEXT NOT NULL, content TEXT NOT NULL, scheduled_time TEXT,
-        status TEXT NOT NULL DEFAULT 'draft', post_url TEXT, created_at TEXT NOT NULL,
-        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
-    );", [])?;
+    // social_posts, ai_logs, ai_knowledge, business_memory, product_drafts,
+    // media_assets — AI-era tables. CREATEs REMOVED in v0.37.0 (AI system
+    // removed). Existing copies are dropped by the dead_tables list below.
 
     conn.execute("CREATE TABLE IF NOT EXISTS automations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
         schedule_type TEXT NOT NULL, last_run TEXT, active INTEGER NOT NULL DEFAULT 1
-    );", [])?;
-
-    conn.execute("CREATE TABLE IF NOT EXISTS ai_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL,
-        response TEXT NOT NULL, provider TEXT NOT NULL, created_at TEXT NOT NULL
-    );", [])?;
-
-    conn.execute("CREATE TABLE IF NOT EXISTS ai_knowledge (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT NOT NULL,
-        content TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual',
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    );", [])?;
-
-    conn.execute("CREATE TABLE IF NOT EXISTS business_memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL,
-        insight TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 1.0,
-        created_at TEXT NOT NULL, last_used_at TEXT NOT NULL,
-        usage_count INTEGER NOT NULL DEFAULT 1
     );", [])?;
 
     conn.execute("CREATE TABLE IF NOT EXISTS settings (
@@ -129,38 +108,8 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     );", [])?;
 
     // === NEW TABLES (v0.4.0 — AI Workspace) ===
-    conn.execute("CREATE TABLE IF NOT EXISTS product_drafts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_type TEXT NOT NULL DEFAULT 'manual',
-        source_data TEXT,
-        draft_data TEXT NOT NULL,
-        confidence REAL DEFAULT 0.0,
-        missing_fields TEXT DEFAULT '[]',
-        status TEXT NOT NULL DEFAULT 'draft',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    );", [])?;
-
-    conn.execute("CREATE TABLE IF NOT EXISTS media_assets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        original_name TEXT NOT NULL,
-        stored_path TEXT NOT NULL,
-        mime_type TEXT NOT NULL,
-        file_size INTEGER NOT NULL DEFAULT 0,
-        source_url TEXT,
-        analysis_result TEXT,
-        draft_id INTEGER,
-        product_id INTEGER,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(draft_id) REFERENCES product_drafts(id) ON DELETE SET NULL,
-        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
-    );", [])?;
-
-    add_col_if_missing(conn, "social_posts", "caption_type", "TEXT DEFAULT 'general'")?;
-    add_col_if_missing(conn, "social_posts", "media_path", "TEXT")?;
-    add_col_if_missing(conn, "social_posts", "draft_id", "INTEGER")?;
-    // Issue #5 fix: store per-platform hashtags as JSON array string
-    add_col_if_missing(conn, "social_posts", "hashtags", "TEXT")?;
+    // product_drafts / media_assets CREATEs REMOVED in v0.37.0 (AI removal).
+    // v0.25.0's dead_tables drop below already removes them from live DBs.
 
     // === OLD NEW TABLES (v0.3.0) ===
 
@@ -491,6 +440,10 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     //   - suppliers: supplier UI never built (v0.1.0)
     //   - locations: replaced by agents in v0.11.0, sync function removed
     //   - product_locations: per-location stock never used (v0.1.0)
+    // v0.37.0 additions — AI system fully removed (owner directive):
+    //   - ai_logs: prompt/response logs, stale data (pi audit 2026-09-26)
+    //   - ai_knowledge: AI knowledge base, feature removed
+    //   - social_posts: zero rows EVER (pi audit 2026-09-26)
     let dead_tables = [
         "business_memory",
         "product_drafts",
@@ -498,6 +451,9 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         "suppliers",
         "product_locations",
         "locations",
+        "ai_logs",
+        "ai_knowledge",
+        "social_posts",
     ];
     for table in &dead_tables {
         let _ = conn.execute(&format!("DROP TABLE IF EXISTS {}", table), []);

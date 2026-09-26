@@ -8,8 +8,6 @@ use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, Best
 use crate::customers::{self, Customer, OrderItemInput, OrderHistory};
 use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
 use crate::purchase_trips::{self, PurchaseTripSummary};
-use crate::adapters::duckduckgo::{self, WebEvidence};
-use crate::ai::{self, AiResponse};
 use crate::utils;
 use crate::commands::{DbState, set_setting_val, get_setting_val};
 use tauri::async_runtime::Mutex;
