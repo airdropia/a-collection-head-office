@@ -18,6 +18,8 @@
 //!   acollectionho manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]
 //!   acollectionho customer-add --name N [--phone P] [--location L] [--notes N]
 //!   acollectionho customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]
+//!   acollectionho record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]
+//!   acollectionho undo-sale <sale_id>
 //!   acollectionho publish-catalog [--notes N]  (publish public catalog PWA to GitHub)
 //!   acollectionho db-drift          (read-only drift report)
 //!   acollectionho db-fix            (recompute outstanding caches from ledger)
@@ -25,7 +27,7 @@
 //!
 //! Exit codes: 0 ok, 1 error, 2 usage.
 
-use a_collection_head_office_lib::{catalog_publish, customers, database, utils};
+use a_collection_head_office_lib::{catalog_publish, commands::sales_commands, customers, database, utils};
 use rusqlite::Connection;
 use std::process::ExitCode;
 
@@ -46,6 +48,15 @@ Writes (reuse the GUI app's exact business logic):\n\
   manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]\n\
   customer-add --name N [--phone P] [--location L] [--notes N]\n\
   customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]\n\
+\n\
+Sales (v0.40.0 — the ONLY sales path, same logic as GUI):\n\
+  record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]\n\
+              [--customer-name N] [--phone P] [--paid AMT] [--notes N]\n\
+              channel default: head_office | paid default: full price.\n\
+              --paid below total leaves udhar balance; with --customer-id\n\
+              the khata updates automatically (same as GUI).\n\
+  undo-sale <sale_id>         soft undo: stock restored, khata reversed,\n\
+              sale row kept with reversed=1 (audit trail)\n\
 \n\
 Catalog (v0.39.0):\n\
   publish-catalog [--notes N]   build + upload public catalog PWA to GitHub\n\
@@ -74,10 +85,13 @@ struct Opts {
     name: Option<String>,
     phone: Option<String>,
     location: Option<String>,
+    channel: Option<String>,
+    customer_id: Option<i64>,
+    paid: Option<f64>,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
-    let mut o = Opts { notes: None, sale_id: None, date: None, name: None, phone: None, location: None };
+    let mut o = Opts { notes: None, sale_id: None, date: None, name: None, phone: None, location: None, channel: None, customer_id: None, paid: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -107,6 +121,24 @@ fn parse_opts(args: &[String]) -> Opts {
             "--location" => {
                 i += 1;
                 o.location = args.get(i).cloned();
+            }
+            "--channel" => {
+                i += 1;
+                o.channel = args.get(i).cloned();
+            }
+            "--customer-id" => {
+                i += 1;
+                o.customer_id = args.get(i).and_then(|v| v.parse().ok());
+                if o.customer_id.is_none() {
+                    die_usage("--customer-id needs a numeric customer id");
+                }
+            }
+            "--paid" => {
+                i += 1;
+                o.paid = args.get(i).and_then(|v| v.parse().ok());
+                if o.paid.is_none() {
+                    die_usage("--paid needs a numeric amount");
+                }
             }
             other => die_usage(&format!("unknown option '{}'", other)),
         }
@@ -231,6 +263,59 @@ fn main() -> ExitCode {
                 if o.notes.is_some() { c.notes = o.notes.clone(); }
                 customers::update_customer(&conn, &c).map_err(|e| e.to_string())?;
                 println!("OK: customer #{} updated", cid);
+                Ok(())
+            }
+
+            "record-sale" => {
+                // v0.40.0: CLI sales path — reuses record_sale_impl, the EXACT
+                // logic the GUI sale modal runs (single source of truth).
+                if rest.len() < 3 {
+                    return Err("usage: record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID] [--customer-name N] [--phone P] [--paid AMT] [--notes N]".into());
+                }
+                let pid: i64 = rest[0].parse().map_err(|_| "product_id must be numeric".to_string())?;
+                let qty: i64 = rest[1].parse().map_err(|_| "qty must be numeric".to_string())?;
+                let price: f64 = rest[2].parse().map_err(|_| "unit_price must be numeric".to_string())?;
+                let o = parse_opts(&rest[3..]);
+                let conn = open_db();
+                let sale_id = sales_commands::record_sale_impl(
+                    &conn,
+                    pid,
+                    qty,
+                    price,
+                    o.channel.as_deref().unwrap_or("head_office"),
+                    o.name.as_deref(),
+                    o.phone.as_deref(),
+                    o.notes.as_deref(),
+                    o.paid,
+                    o.customer_id,
+                )?;
+                let (total, paid, balance): (f64, f64, f64) = conn
+                    .query_row(
+                        "SELECT total_sale_amount, COALESCE(amount_paid, 0.0), COALESCE(balance, 0.0) FROM sales WHERE id = ?1",
+                        [sale_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let channel_used = o.channel.as_deref().unwrap_or("head_office");
+                println!("OK: sale #{} recorded — product #{} x{} @ Rs. {:.0} (channel: {})", sale_id, pid, qty, price, channel_used);
+                println!("total: Rs. {:.0} | paid: Rs. {:.0} | udhar balance: Rs. {:.0}", total, paid, balance);
+                if balance > 0.0 && o.customer_id.is_none() {
+                    println!("NOTE: udhar balance NOT linked to any customer (no --customer-id) — khata untouched");
+                }
+                Ok(())
+            }
+
+            "undo-sale" => {
+                // v0.40.0: CLI undo — reuses undo_sale_impl (agent branch kept
+                // for historical agent sales per DATA POLICY).
+                if rest.is_empty() {
+                    return Err("usage: undo-sale <sale_id>".into());
+                }
+                let sid: i64 = rest[0].parse().map_err(|_| "sale_id must be numeric".to_string())?;
+                let conn = open_db();
+                sales_commands::undo_sale_impl(&conn, sid)?;
+                println!("OK: sale #{} undone — stock restored, qty_sold reduced, khata reversed (if any)", sid);
+                println!("sale row kept with reversed=1 (audit trail)");
                 Ok(())
             }
 

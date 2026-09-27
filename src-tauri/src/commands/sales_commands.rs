@@ -22,6 +22,11 @@ use tauri::State;
 // v0.12.5 — Sales Recording (Head Office records ALL sales)
 // ============================================================
 
+/// Core sale-recording logic — SINGLE SOURCE OF TRUTH, shared by the GUI
+/// command and the acollectionho write-CLI (v0.40.0). Sync, plain
+/// &Connection — caller owns locking. Wrapped in BEGIN IMMEDIATE / COMMIT
+/// so the whole check-stock → product → sale → khata sequence is atomic.
+///
 /// Record a direct HO sale. (v0.36.0: agent walk-in sales removed with the
 /// Agents feature — sales.agent_id stays NULL for new rows; historical
 /// agent sales remain undoable via undo_sale.)
@@ -31,23 +36,21 @@ use tauri::State;
 /// - product HO stock reduced
 /// - product.qty_sold increased
 /// - product.profit_status auto-recalculated
-#[tauri::command]
-pub async fn record_sale(
-    state: State<'_, DbState>,
+pub fn record_sale_impl(
+    conn: &Connection,
     product_id: i64,
     qty: i64,
     unit_sale_price: f64,
-    sale_channel: String,
-    customer_name: Option<String>,
-    customer_phone: Option<String>,
-    notes: Option<String>,
+    sale_channel: &str,
+    customer_name: Option<&str>,
+    customer_phone: Option<&str>,
+    notes: Option<&str>,
     amount_paid: Option<f64>,
     customer_id: Option<i64>,
 ) -> Result<i64, String> {
     if qty <= 0 {
         return Err("Quantity must be positive.".to_string());
     }
-    let conn = state.0.lock().await;
     let now = chrono::Utc::now().to_rfc3339();
     let total = qty as f64 * unit_sale_price;
 
@@ -112,7 +115,7 @@ pub async fn record_sale(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         rusqlite::params![
             product_id,
-            &sale_channel,
+            sale_channel,
             "direct_sale",
             Option::<i64>::None,
             qty,
@@ -121,9 +124,9 @@ pub async fn record_sale(
             paid,
             balance,
             customer_id,
-            customer_name.as_deref().unwrap_or(""),
-            customer_phone.as_deref().unwrap_or(""),
-            notes.as_deref().unwrap_or(""),
+            customer_name.unwrap_or(""),
+            customer_phone.unwrap_or(""),
+            notes.unwrap_or(""),
             &now,
             &now,
             &now,
@@ -169,6 +172,36 @@ pub async fn record_sale(
     Ok(sale_id)
 }
 
+/// GUI command — thin wrapper around record_sale_impl (v0.40.0 extraction;
+/// behavior identical to the pre-v0.40.0 inline version).
+#[tauri::command]
+pub async fn record_sale(
+    state: State<'_, DbState>,
+    product_id: i64,
+    qty: i64,
+    unit_sale_price: f64,
+    sale_channel: String,
+    customer_name: Option<String>,
+    customer_phone: Option<String>,
+    notes: Option<String>,
+    amount_paid: Option<f64>,
+    customer_id: Option<i64>,
+) -> Result<i64, String> {
+    let conn = state.0.lock().await;
+    record_sale_impl(
+        &conn,
+        product_id,
+        qty,
+        unit_sale_price,
+        &sale_channel,
+        customer_name.as_deref(),
+        customer_phone.as_deref(),
+        notes.as_deref(),
+        amount_paid,
+        customer_id,
+    )
+}
+
 // ============================================================
 // v0.30.0: SALE UNDO + SOLD ITEMS MANAGEMENT
 // ============================================================
@@ -202,12 +235,10 @@ pub async fn record_sale(
 /// - Has already been reversed
 /// - Has customer payments recorded against it (those would need to be
 ///   deleted first — caller's responsibility)
-#[tauri::command]
-pub async fn undo_sale(
-    state: State<'_, DbState>,
+pub fn undo_sale_impl(
+    conn: &Connection,
     sale_id: i64,
 ) -> Result<(), String> {
-    let conn = state.0.lock().await;
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
@@ -355,6 +386,17 @@ pub async fn undo_sale(
 
     let _ = sale_channel; // suppress unused warning
     Ok(())
+}
+
+/// GUI command — thin wrapper around undo_sale_impl (v0.40.0 extraction;
+/// behavior identical to the pre-v0.40.0 inline version).
+#[tauri::command]
+pub async fn undo_sale(
+    state: State<'_, DbState>,
+    sale_id: i64,
+) -> Result<(), String> {
+    let conn = state.0.lock().await;
+    undo_sale_impl(&conn, sale_id)
 }
 
 /// Reactivate a sold-out product. Sets profit_status to 'in_head_office'
