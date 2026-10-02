@@ -231,9 +231,9 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     // --- products table: additive column extensions for profit-mode ---
     // Existing columns (sku, name, cost_price, sale_price, etc.) are kept
     // untouched. These new columns enable profit-mode features.
-    add_col_if_missing(conn, "products", "source_trip_id", "INTEGER DEFAULT NULL")?;
-    add_col_if_missing(conn, "products", "base_unit_cost", "REAL DEFAULT 0.0")?;
-    add_col_if_missing(conn, "products", "landed_unit_cost", "REAL DEFAULT 0.0")?;
+    // v0.41.0: source_trip_id / base_unit_cost / landed_unit_cost adds
+    // REMOVED (Purchase Trips leftovers — dropped by the dead-columns
+    // cleanup at the end of init_db; nothing reads or writes them).
     add_col_if_missing(conn, "products", "retail_price", "REAL")?;
     add_col_if_missing(conn, "products", "discount_price", "REAL")?;
     add_col_if_missing(conn, "products", "size_info", "TEXT")?;
@@ -269,11 +269,8 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         "UPDATE products SET retail_price = NULL WHERE retail_price IS NOT NULL AND retail_price = sale_price",
         [],
     );
-    // Backfill base_unit_cost from existing purchase_price (or cost_price) for legacy products.
-    let _ = conn.execute(
-        "UPDATE products SET base_unit_cost = COALESCE(purchase_price, cost_price, 0.0) WHERE base_unit_cost = 0.0",
-        [],
-    );
+    // v0.41.0: base_unit_cost backfill REMOVED with the column itself
+    // (Purchase Trips leftover; cost basis lives in purchase_price/cost_price).
 
     seed_initial_data(conn)?;
     ensure_business_profile(conn)?;
@@ -414,6 +411,29 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     ];
     for table in &dead_tables {
         let _ = conn.execute(&format!("DROP TABLE IF EXISTS {}", table), []);
+    }
+
+    // ============================================================
+    // v0.41.0 — dead COLUMN drop (Purchase Trips leftovers)
+    // ============================================================
+    // source_trip_id / base_unit_cost / landed_unit_cost belonged to the
+    // Purchase Trips profit-mode, removed in v0.38.0 (owner verdict, pi
+    // audit: 2 header-only trips, 0 items ever). Nothing writes them since
+    // the Catalog form never sent them, and the Catalog GUI displayed
+    // landed_unit_cost as '-' forever. Best-effort drop (needs SQLite
+    // >= 3.35; the bundled rusqlite is far newer) — if the drop ever fails,
+    // the app keeps working: no remaining code reads these columns.
+    for col in ["source_trip_id", "base_unit_cost", "landed_unit_cost"] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = ?1",
+                [col],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if exists > 0 {
+            let _ = conn.execute(&format!("ALTER TABLE products DROP COLUMN {}", col), []);
+        }
     }
 
     Ok(())

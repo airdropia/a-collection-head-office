@@ -18,6 +18,10 @@
 //!   acollectionho manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]
 //!   acollectionho customer-add --name N [--phone P] [--location L] [--notes N]
 //!   acollectionho customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]
+//!   acollectionho product-add <sku> <name> <cost> <sale> [qty] [--category C]
+//!                              [--brand B] [--fabric F] [--color C] [--retail R]
+//!                              [--purchase P] [--desc D]
+//!   acollectionho stock-add <product_id> <qty> [--notes N]
 //!   acollectionho record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]
 //!   acollectionho undo-sale <sale_id>
 //!   acollectionho publish-catalog [--notes N]  (publish public catalog PWA to GitHub)
@@ -27,7 +31,7 @@
 //!
 //! Exit codes: 0 ok, 1 error, 2 usage.
 
-use a_collection_head_office_lib::{catalog_publish, commands::sales_commands, customers, database, utils};
+use a_collection_head_office_lib::{catalog, catalog_publish, commands::sales_commands, customers, database, inventory, utils};
 use rusqlite::Connection;
 use std::process::ExitCode;
 
@@ -48,6 +52,16 @@ Writes (reuse the GUI app's exact business logic):\n\
   manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]\n\
   customer-add --name N [--phone P] [--location L] [--notes N]\n\
   customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]\n\
+\n\
+Products (v0.41.0 — new-maal entry, replaces removed Purchase Trips):\n\
+  product-add <sku> <name> <cost> <sale> [qty]\n\
+              [--category C] [--brand B] [--fabric F] [--color C]\n\
+              [--retail R] [--purchase P] [--desc D]\n\
+              same INSERT the GUI Catalog form runs; cost = khareed rate\n\
+              (purchase_price defaults to it), qty lands in head office.\n\
+  stock-add <product_id> <qty> [--notes N]\n\
+              restock existing article (+/-; negative = correction).\n\
+              moves qty_in_head_office in lockstep with stock_quantity.\n\
 \n\
 Sales (v0.40.0 — the ONLY sales path, same logic as GUI):\n\
   record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]\n\
@@ -88,10 +102,18 @@ struct Opts {
     channel: Option<String>,
     customer_id: Option<i64>,
     paid: Option<f64>,
+    // v0.41.0 — product-add flags
+    category: Option<String>,
+    brand: Option<String>,
+    fabric: Option<String>,
+    color: Option<String>,
+    desc: Option<String>,
+    retail: Option<f64>,
+    purchase: Option<f64>,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
-    let mut o = Opts { notes: None, sale_id: None, date: None, name: None, phone: None, location: None, channel: None, customer_id: None, paid: None };
+    let mut o = Opts { notes: None, sale_id: None, date: None, name: None, phone: None, location: None, channel: None, customer_id: None, paid: None, category: None, brand: None, fabric: None, color: None, desc: None, retail: None, purchase: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -138,6 +160,40 @@ fn parse_opts(args: &[String]) -> Opts {
                 o.paid = args.get(i).and_then(|v| v.parse().ok());
                 if o.paid.is_none() {
                     die_usage("--paid needs a numeric amount");
+                }
+            }
+            "--category" => {
+                i += 1;
+                o.category = args.get(i).cloned();
+            }
+            "--brand" => {
+                i += 1;
+                o.brand = args.get(i).cloned();
+            }
+            "--fabric" => {
+                i += 1;
+                o.fabric = args.get(i).cloned();
+            }
+            "--color" => {
+                i += 1;
+                o.color = args.get(i).cloned();
+            }
+            "--desc" => {
+                i += 1;
+                o.desc = args.get(i).cloned();
+            }
+            "--retail" => {
+                i += 1;
+                o.retail = args.get(i).and_then(|v| v.parse().ok());
+                if o.retail.is_none() {
+                    die_usage("--retail needs a numeric price");
+                }
+            }
+            "--purchase" => {
+                i += 1;
+                o.purchase = args.get(i).and_then(|v| v.parse().ok());
+                if o.purchase.is_none() {
+                    die_usage("--purchase needs a numeric price");
                 }
             }
             other => die_usage(&format!("unknown option '{}'", other)),
@@ -263,6 +319,131 @@ fn main() -> ExitCode {
                 if o.notes.is_some() { c.notes = o.notes.clone(); }
                 customers::update_customer(&conn, &c).map_err(|e| e.to_string())?;
                 println!("OK: customer #{} updated", cid);
+                Ok(())
+            }
+
+            "product-add" => {
+                // v0.41.0: new-maal entry path (Purchase Trips removed in
+                // v0.38.0). Reuses catalog::add_product — the EXACT INSERT
+                // the GUI Catalog form runs (stock_quantity + qty_in_head_office
+                // lockstep, purchase_price cost basis, server-side timestamps).
+                // Positionals stop at the first --flag, so flags can follow
+                // in any order.
+                let mut pos: Vec<&String> = Vec::new();
+                let mut i = 0;
+                while i < rest.len() && !rest[i].starts_with("--") {
+                    pos.push(&rest[i]);
+                    i += 1;
+                }
+                if pos.len() < 4 || pos.len() > 5 {
+                    return Err("usage: product-add <sku> <name> <cost> <sale> [qty] [--category C] [--brand B] [--fabric F] [--color C] [--retail R] [--purchase P] [--desc D]".into());
+                }
+                let sku = pos[0].trim().to_string();
+                let name = pos[1].trim().to_string();
+                if sku.is_empty() || name.is_empty() {
+                    return Err("sku and name must be non-empty".into());
+                }
+                let cost: f64 = pos[2].parse().map_err(|_| "cost must be numeric".to_string())?;
+                let sale: f64 = pos[3].parse().map_err(|_| "sale must be numeric".to_string())?;
+                if cost < 0.0 || sale < 0.0 {
+                    return Err("cost and sale must be >= 0".into());
+                }
+                let qty: i64 = match pos.get(4) {
+                    Some(v) => v.parse().map_err(|_| "qty must be numeric".to_string())?,
+                    None => 0,
+                };
+                if qty < 0 {
+                    return Err("qty must be >= 0 (stock deduction sirf record-sale/undo-sale se hoti hai)".into());
+                }
+                let o = parse_opts(&rest[i..]);
+                let product = catalog::Product {
+                    id: None,
+                    sku: sku.clone(),
+                    name: name.clone(),
+                    category: o.category.clone(),
+                    color: o.color.clone(),
+                    design: None,
+                    season: None,
+                    cost_price: cost,
+                    sale_price: sale,
+                    purchase_price: o.purchase.unwrap_or(cost),
+                    description: o.desc.clone(),
+                    tags: None,
+                    stock_quantity: qty,
+                    status: "active".to_string(),
+                    images: "[]".to_string(),
+                    supplier_id: None,
+                    created_at: None,
+                    updated_at: None,
+                    product_code: None,
+                    brand: o.brand.clone(),
+                    fabric: o.fabric.clone(),
+                    size_info: None,
+                    retail_price: o.retail,
+                    discount_price: None,
+                    qty_in_head_office: Some(qty),
+                    qty_with_agents: Some(0),
+                    qty_sold: Some(0),
+                    qty_reserved: Some(0),
+                    profit_status: Some("in_head_office".to_string()),
+                };
+                let conn = open_db();
+                match catalog::add_product(&conn, &product) {
+                    Ok(id) => {
+                        println!("OK: product #{} added — {} ({})", id, name, sku);
+                        println!("cost: Rs. {:.0} | sale: Rs. {:.0} | qty: {} (head office)", cost, sale, qty);
+                        if let Some(r) = o.retail {
+                            println!("retail (caption price): Rs. {:.0}", r);
+                        }
+                        println!("PWA par publish karne ke liye: publish-catalog");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("UNIQUE") {
+                            Err(format!("SKU '{}' already exists — duplicate article? (different SKU use karein ya existing product ko stock-add karein)", sku))
+                        } else {
+                            Err(msg)
+                        }
+                    }
+                }
+            }
+
+            "stock-add" => {
+                // v0.41.0: restock path — reuses inventory::adjust_stock (the
+                // same fn the GUI Inventory tab runs). v0.41.0 impl hotfix
+                // moves qty_in_head_office in lockstep with stock_quantity,
+                // so Dashboard + Catalog figures stay correct.
+                let mut pos: Vec<&String> = Vec::new();
+                let mut i = 0;
+                while i < rest.len() && !rest[i].starts_with("--") {
+                    pos.push(&rest[i]);
+                    i += 1;
+                }
+                if pos.len() != 2 {
+                    return Err("usage: stock-add <product_id> <qty> [--notes N]  (negative qty = correction/deduct)".into());
+                }
+                let pid: i64 = pos[0].parse().map_err(|_| "product_id must be numeric".to_string())?;
+                let qty: i64 = pos[1].parse().map_err(|_| "qty must be numeric".to_string())?;
+                if qty == 0 {
+                    return Err("qty must be non-zero".into());
+                }
+                let o = parse_opts(&rest[i..]);
+                let conn = open_db();
+                let before = catalog::get_product_by_id(&conn, pid)
+                    .map_err(|_| format!("product #{} not found", pid))?;
+                inventory::adjust_stock(&conn, pid, qty).map_err(|e| e.to_string())?;
+                let after = catalog::get_product_by_id(&conn, pid).map_err(|e| e.to_string())?;
+                let sign = if qty > 0 { "+" } else { "-" };
+                println!(
+                    "OK: product #{} '{}' ({}) stock {}{} -> {} (head office)",
+                    pid, before.name, before.sku, sign, qty.abs(), after.stock_quantity
+                );
+                if let Some(n) = &o.notes {
+                    if !n.trim().is_empty() {
+                        println!("Notes: {}", n);
+                    }
+                }
                 Ok(())
             }
 

@@ -721,7 +721,6 @@ export default function Catalog() {
                 <th className="py-3 px-3">Code</th>
                 <th className="py-3 px-3">Category</th>
                 <th className="py-3 px-3">Color</th>
-                <th className="py-3 px-3 text-right">Landed</th>
                 <th className="py-3 px-3 text-right">Sale</th>
                 <th className="py-3 px-3 text-center">HO</th>
                 <th className="py-3 px-3 text-center">Agents</th>
@@ -780,9 +779,6 @@ export default function Catalog() {
                   <td className="py-3 px-3">{p.category || '-'}</td>
                   <td className="py-3 px-3">
                     {p.color ? <span className="inline-flex items-center space-x-1 text-xs"><span className="w-2.5 h-2.5 rounded-full inline-block" style={{backgroundColor: p.color.toLowerCase()}} /> <span>{p.color}</span></span> : '-'}
-                  </td>
-                  <td className="py-3 px-3 text-right font-mono text-xs text-amber-400">
-                    {p.landed_unit_cost ? `Rs.${p.landed_unit_cost.toFixed(0)}` : '-'}
                   </td>
                   <td className="py-3 px-3 text-right font-mono text-xs text-violet-400">Rs.{p.sale_price.toFixed(0)}</td>
                   <td className={`py-3 px-3 text-center font-bold text-xs ${(p.qty_in_head_office ?? p.stock_quantity) <= 5 ? 'text-red-400' : 'text-gray-300'}`}>

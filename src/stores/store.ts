@@ -25,11 +25,10 @@ export interface Product {
   brand?: string;
   fabric?: string;
   size_info?: string;
-  base_unit_cost?: number;
-  landed_unit_cost?: number;
+  // v0.41.0: base_unit_cost / landed_unit_cost / source_trip_id removed
+  // (Purchase Trips leftovers — DB columns dropped, backend struct cleaned).
   retail_price?: number;
   discount_price?: number;
-  source_trip_id?: number;
   qty_in_head_office?: number;
   qty_with_agents?: number;
   qty_sold?: number;

@@ -173,9 +173,16 @@ pub fn get_best_sellers(conn: &Connection, limit: i64) -> Result<Vec<BestSellerI
 
 pub fn adjust_stock(conn: &Connection, product_id: i64, adjustment: i64) -> Result<(), rusqlite::Error> {
     let now = chrono::Utc::now().to_rfc3339();
+    // v0.41.0 hotfix: qty_in_head_office now moves in lockstep with
+    // stock_quantity (same convention as catalog::add_product/update_product).
+    // Catalog overview + Dashboard read `qty_in_head_office ?? stock_quantity`
+    // (preferring qty_in_head_office), so the old stock_quantity-only update
+    // left every HO stock figure stale after an Inventory-tab adjustment.
     conn.execute(
-        "UPDATE products 
-         SET stock_quantity = MAX(0, stock_quantity + ?1), updated_at = ?2
+        "UPDATE products
+         SET stock_quantity = MAX(0, stock_quantity + ?1),
+             qty_in_head_office = MAX(0, qty_in_head_office + ?1),
+             updated_at = ?2
          WHERE id = ?3",
         params![adjustment, now, product_id],
     )?;

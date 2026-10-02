@@ -44,15 +44,12 @@ pub struct Product {
     #[serde(default)]
     pub size_info: Option<String>,
     #[serde(default)]
-    pub base_unit_cost: Option<f64>,
-    #[serde(default)]
-    pub landed_unit_cost: Option<f64>,
-    #[serde(default)]
     pub retail_price: Option<f64>,
     #[serde(default)]
     pub discount_price: Option<f64>,
-    #[serde(default)]
-    pub source_trip_id: Option<i64>,
+    // v0.41.0: base_unit_cost / landed_unit_cost / source_trip_id REMOVED
+    // from the struct (Purchase Trips leftovers — columns dropped by the
+    // init_db dead-columns cleanup; nothing read or wrote them).
     #[serde(default)]
     pub qty_in_head_office: Option<i64>,
     #[serde(default)]
@@ -70,8 +67,7 @@ pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>, rusqlite::Err
         "SELECT id, COALESCE(sku,''), name, category, color, design, season,
                 cost_price, sale_price, COALESCE(purchase_price, cost_price),
                 description, tags, stock_quantity, status, images, supplier_id, created_at, updated_at,
-                product_code, brand, fabric, size_info, base_unit_cost, landed_unit_cost,
-                retail_price, discount_price, source_trip_id,
+                product_code, brand, fabric, size_info, retail_price, discount_price,
                 qty_in_head_office, qty_with_agents, qty_sold, qty_reserved, profit_status
          FROM products ORDER BY id DESC"
     )?;
@@ -99,16 +95,13 @@ pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>, rusqlite::Err
             brand: row.get(19)?,
             fabric: row.get(20)?,
             size_info: row.get(21)?,
-            base_unit_cost: row.get(22)?,
-            landed_unit_cost: row.get(23)?,
-            retail_price: row.get(24)?,
-            discount_price: row.get(25)?,
-            source_trip_id: row.get(26)?,
-            qty_in_head_office: row.get(27)?,
-            qty_with_agents: row.get(28)?,
-            qty_sold: row.get(29)?,
-            qty_reserved: row.get(30)?,
-            profit_status: row.get(31)?,
+            retail_price: row.get(22)?,
+            discount_price: row.get(23)?,
+            qty_in_head_office: row.get(24)?,
+            qty_with_agents: row.get(25)?,
+            qty_sold: row.get(26)?,
+            qty_reserved: row.get(27)?,
+            profit_status: row.get(28)?,
         })
     })?;
     let mut products = Vec::new();
@@ -121,8 +114,7 @@ pub fn get_product_by_id(conn: &Connection, id: i64) -> Result<Product, rusqlite
         "SELECT id, COALESCE(sku,''), name, category, color, design, season,
                 cost_price, sale_price, COALESCE(purchase_price, cost_price),
                 description, tags, stock_quantity, status, images, supplier_id, created_at, updated_at,
-                product_code, brand, fabric, size_info, base_unit_cost, landed_unit_cost,
-                retail_price, discount_price, source_trip_id,
+                product_code, brand, fabric, size_info, retail_price, discount_price,
                 qty_in_head_office, qty_with_agents, qty_sold, qty_reserved, profit_status
          FROM products WHERE id = ?1",
         [id],
@@ -150,16 +142,13 @@ pub fn get_product_by_id(conn: &Connection, id: i64) -> Result<Product, rusqlite
                 brand: row.get(19)?,
                 fabric: row.get(20)?,
                 size_info: row.get(21)?,
-                base_unit_cost: row.get(22)?,
-                landed_unit_cost: row.get(23)?,
-                retail_price: row.get(24)?,
-                discount_price: row.get(25)?,
-                source_trip_id: row.get(26)?,
-                qty_in_head_office: row.get(27)?,
-                qty_with_agents: row.get(28)?,
-                qty_sold: row.get(29)?,
-                qty_reserved: row.get(30)?,
-                profit_status: row.get(31)?,
+                retail_price: row.get(22)?,
+                discount_price: row.get(23)?,
+                qty_in_head_office: row.get(24)?,
+                qty_with_agents: row.get(25)?,
+                qty_sold: row.get(26)?,
+                qty_reserved: row.get(27)?,
+                profit_status: row.get(28)?,
             })
         },
     )
