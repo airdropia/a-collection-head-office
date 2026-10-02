@@ -23,6 +23,10 @@
 //!                              [--purchase P] [--desc D]
 //!   acollectionho stock-add <product_id> <qty> [--notes N]
 //!   acollectionho product-delete <sku> [--yes]  (never-sold products only)
+//!   acollectionho product-archive <sku>  /  product-restore <sku>
+//!   acollectionho product-import-csv <path.csv>  /  product-export-csv <path.csv>
+//!   acollectionho backup-now  /  backup-list  /  backup-restore <file.db> [--yes]
+//!   acollectionho settings-get [key]  /  settings-set <key> <value>
 //!   acollectionho record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]
 //!   acollectionho undo-sale <sale_id>
 //!   acollectionho publish-catalog [--notes N]  (publish public catalog PWA to GitHub)
@@ -32,8 +36,9 @@
 //!
 //! Exit codes: 0 ok, 1 error, 2 usage.
 
-use a_collection_head_office_lib::{catalog, catalog_publish, commands::sales_commands, customers, database, inventory, utils};
+use a_collection_head_office_lib::{catalog, catalog_publish, commands, commands::sales_commands, customers, database, inventory, utils};
 use rusqlite::Connection;
+use std::path::Path;
 use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -67,6 +72,23 @@ Products (v0.41.0 — new-maal entry, replaces removed Purchase Trips):\n\
               remove a wrong/never-sold entry (smoke rows etc.).\n\
               BLOCKED if any sale rows exist (audit trail) or agents\n\
               hold stock; non-zero stock needs --yes confirm.\n\
+  product-archive <sku>  |  product-restore <sku>\n\
+              archive = catalog/publish/dashboard se GAYAB,\n\
+              sales+ledger history salamat (kuch delete nahi hota).\n\
+  product-import-csv <path.csv>\n\
+              13 cols: sku,name,category,color,design,season,cost,sale,\n\
+              retail,brand,fabric,qty,purchase_price. Header optional.\n\
+              Duplicate SKUs skipped + reported; bad rows reported.\n\
+  product-export-csv <path.csv>\n\
+              same 13-col schema (import round-trip safe).\n\
+\n\
+Backups & settings (v0.43.0):\n\
+  backup-now  |  backup-list  |  backup-restore <file.db> [--yes]\n\
+              VACUUM INTO snapshots (WAL-safe); backup_path setting\n\
+              zaroori. restore = --yes + automatic pre-restore safety\n\
+              backup; .db files only (ZIP restore GUI me).\n\
+  settings-get [key]  |  settings-set <key> <value>\n\
+              publish/backup config CLI se; token values MASKED.\n\
 \n\
 Sales (v0.40.0 — the ONLY sales path, same logic as GUI):\n\
   record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]\n\
@@ -212,6 +234,28 @@ fn parse_opts(args: &[String]) -> Opts {
         i += 1;
     }
     o
+}
+
+/// v0.43.0: mask secret-looking setting values (tokens/passwords) so they
+/// never reach the terminal in full. Non-secrets pass through untouched.
+fn mask_secret(key: &str, val: &str) -> String {
+    let k = key.to_lowercase();
+    let sensitive = k.contains("token")
+        || k.contains("password")
+        || k.contains("secret")
+        || val.starts_with("ghp_")
+        || val.starts_with("github_pat_");
+    if !sensitive {
+        return val.to_string();
+    }
+    if val.len() <= 8 {
+        return "****".to_string();
+    }
+    if val.is_ascii() {
+        format!("{}****{}", &val[..4], &val[val.len() - 4..])
+    } else {
+        "****".to_string()
+    }
 }
 
 fn open_db() -> Connection {
@@ -510,6 +554,291 @@ fn main() -> ExitCode {
                     "OK: product #{} '{}' ({}) deleted — freed head-office stock: {}",
                     pid, p.name, p.sku, p.stock_quantity
                 );
+                Ok(())
+            }
+
+            "product-archive" | "product-restore" => {
+                // v0.43.0: catalog/accounting decoupling (owner usool) —
+                // archive = status change only: item catalog/publish/
+                // dashboard views se gayab, but NOTHING is deleted, so
+                // sales + ledger history stay 100% intact. No guards
+                // needed by design. restore brings it back as 'active'.
+                let archiving = cmd == "product-archive";
+                if rest.is_empty() || rest[0].starts_with("--") {
+                    return Err(format!("usage: {} <sku>", cmd));
+                }
+                let sku = rest[0].trim().to_string();
+                let conn = open_db();
+                let p = catalog::get_product_by_sku(&conn, &sku)
+                    .map_err(|_| format!("no product with SKU '{}' — 'products list' se sahi SKU dekhein", sku))?;
+                let pid = p.id.unwrap_or(0);
+                if archiving && p.status == "archived" {
+                    println!("product #{} '{}' pehle se archived hai (kuch nahi badla)", pid, p.sku);
+                    return Ok(());
+                }
+                if !archiving && p.status != "archived" {
+                    println!("product #{} '{}' archived nahi hai (status: '{}') — kuch nahi badla", pid, p.sku, p.status);
+                    return Ok(());
+                }
+                let new_status = if archiving { "archived" } else { "active" };
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE products SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                    [new_status, now.as_str(), pid.to_string().as_str()],
+                )
+                .map_err(|e| e.to_string())?;
+                if archiving {
+                    println!(
+                        "OK: product #{} '{}' ARCHIVED — catalog/publish se gayab, sales+ledger history salamat",
+                        pid, p.sku
+                    );
+                    let agents_qty = p.qty_with_agents.unwrap_or(0);
+                    if agents_qty > 0 {
+                        println!(
+                            "NOTE: agents ke paas {} unit ka ledger record mojood hai (history me salamat)",
+                            agents_qty
+                        );
+                    }
+                } else {
+                    println!(
+                        "OK: product #{} '{}' wapas ACTIVE — agar stock 0 hai to publish me sold-out dikhe ga",
+                        pid, p.sku
+                    );
+                }
+                Ok(())
+            }
+
+            "product-import-csv" => {
+                // v0.43.0: bulk entry for new-catalog builds. Reuses
+                // catalog::add_product per row (GUI-form INSERT parity,
+                // qty lockstep holds). Dup SKUs skipped + reported.
+                if rest.is_empty() || rest[0].starts_with("--") {
+                    return Err("usage: product-import-csv <path.csv>  (13 cols: sku,name,category,color,design,season,cost,sale,retail,brand,fabric,qty,purchase_price)".into());
+                }
+                let path = Path::new(rest[0].trim());
+                if !path.exists() {
+                    return Err(format!("CSV file nahi mili: {}", rest[0]));
+                }
+                let conn = open_db();
+                let report = catalog::import_products_csv(&conn, path)
+                    .map_err(|e| e.to_string())?;
+                println!("CSV import — data rows: {}", report.total_rows);
+                println!(
+                    "imported: {} | skipped (duplicate SKU): {} | failed: {}",
+                    report.imported.len(),
+                    report.skipped_dupes.len(),
+                    report.failed.len()
+                );
+                if !report.skipped_dupes.is_empty() {
+                    println!("duplicate SKUs (skip hui): {}", report.skipped_dupes.join(", "));
+                }
+                for f in &report.failed {
+                    println!("FAILED: {}", f);
+                }
+                if report.imported.is_empty() && !report.failed.is_empty() {
+                    return Err("import fail — koi bhi row import nahi hui (upar FAILED dekhein)".into());
+                }
+                Ok(())
+            }
+
+            "product-export-csv" => {
+                // v0.43.0: bulk export — same 13-col schema as import,
+                // so export -> edit -> re-import round-trip works.
+                if rest.is_empty() || rest[0].starts_with("--") {
+                    return Err("usage: product-export-csv <path.csv>".into());
+                }
+                let path = Path::new(rest[0].trim());
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+                let conn = open_db();
+                let count = catalog::export_products_csv(&conn, path)
+                    .map_err(|e| e.to_string())?;
+                println!("OK: {} product(s) exported — {}", count, path.to_string_lossy());
+                Ok(())
+            }
+
+            "backup-now" => {
+                // v0.43.0: consistent snapshot via VACUUM INTO — includes
+                // WAL content, safe even if the GUI app is mid-transaction.
+                // Requires the backup_path setting (settings-set backup_path).
+                let conn = open_db();
+                let backup_path = commands::get_setting_val(&conn, "backup_path").unwrap_or_default();
+                if backup_path.trim().is_empty() {
+                    return Err("backup path set nahi hai — pehle: acollectionho settings-set backup_path <dir>".into());
+                }
+                let backup_dir = Path::new(&backup_path);
+                if !backup_dir.exists() {
+                    return Err(format!("backup dir maujood nahi: {}", backup_path));
+                }
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+                let dest = backup_dir.join(format!("cli_backup_{}.db", ts));
+                let sql = format!(
+                    "VACUUM INTO '{}'",
+                    dest.to_string_lossy().replace('\'', "''")
+                );
+                conn.execute_batch(&sql).map_err(|e| format!("backup failed: {}", e))?;
+                let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                println!("OK: backup written — {} ({} bytes)", dest.to_string_lossy(), size);
+                Ok(())
+            }
+
+            "backup-list" => {
+                // v0.43.0: list .db/.zip backups in backup_path, newest
+                // first (same validity rules as the GUI Settings list).
+                let conn = open_db();
+                let backup_path = commands::get_setting_val(&conn, "backup_path").unwrap_or_default();
+                if backup_path.trim().is_empty() {
+                    return Err("backup path set nahi hai — pehle: acollectionho settings-set backup_path <dir>".into());
+                }
+                let backup_dir = Path::new(&backup_path);
+                if !backup_dir.exists() {
+                    println!("(backup dir maujood nahi: {})", backup_path);
+                    return Ok(());
+                }
+                let mut rows: Vec<(String, u64, String)> = Vec::new();
+                for entry in std::fs::read_dir(backup_dir)
+                    .map_err(|e| format!("read dir: {}", e))?
+                    .flatten()
+                {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !(name.ends_with(".db") || name.ends_with(".zip")) {
+                        continue;
+                    }
+                    if name.contains("weekly_report") {
+                        continue;
+                    }
+                    let md = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let size = md.len();
+                    if name.ends_with(".db") && size <= 10240 {
+                        continue; // empty/corrupt guard (same as GUI)
+                    }
+                    let modified = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|d| chrono::DateTime::<chrono::Utc>::from_timestamp(d.as_secs() as i64, 0))
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default();
+                    rows.push((name, size, modified));
+                }
+                rows.sort_by(|a, b| b.2.cmp(&a.2));
+                if rows.is_empty() {
+                    println!("(koi backup nahi mila: {})", backup_path);
+                }
+                for (name, size, modified) in rows {
+                    println!("{}  {:>10}  {}", modified, size, name);
+                }
+                Ok(())
+            }
+
+            "backup-restore" => {
+                // v0.43.0: DANGEROUS by nature — guarded: --yes required,
+                // .db files only, basename only (no path traversal), and an
+                // automatic pre-restore VACUUM INTO snapshot of the CURRENT
+                // DB is taken before anything is overwritten.
+                if rest.is_empty() {
+                    return Err("usage: backup-restore <filename.db> [--yes]".into());
+                }
+                let filename = rest[0].trim().to_string();
+                if filename.starts_with("--")
+                    || !filename.ends_with(".db")
+                    || filename.contains('/')
+                    || filename.contains('\\')
+                    || filename.contains("..")
+                {
+                    return Err("usage: backup-restore <filename.db> [--yes]  (sirf .db basename — koi path nahi; ZIP restore GUI me)".into());
+                }
+                let o = parse_opts(&rest[1..]);
+                if !o.yes {
+                    return Err(format!(
+                        "restore current DB ko OVERWRITE karta hai — confirm: backup-restore {} --yes",
+                        filename
+                    ));
+                }
+                let conn = open_db();
+                let backup_path = commands::get_setting_val(&conn, "backup_path").unwrap_or_default();
+                if backup_path.trim().is_empty() {
+                    return Err("backup path set nahi hai — pehle: acollectionho settings-set backup_path <dir>".into());
+                }
+                let source = Path::new(&backup_path).join(&filename);
+                if !source.exists() {
+                    return Err(format!("backup file nahi mili: {}", filename));
+                }
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+                let safety = Path::new(&backup_path).join(format!("pre_restore_{}.db", ts));
+                let safety_sql = format!(
+                    "VACUUM INTO '{}'",
+                    safety.to_string_lossy().replace('\'', "''")
+                );
+                conn.execute_batch(&safety_sql)
+                    .map_err(|e| format!("pre-restore safety backup failed: {}", e))?;
+                drop(conn); // release the DB before overwriting files
+                let db_path = utils::get_db_path();
+                std::fs::copy(&source, &db_path).map_err(|e| format!("restore failed: {}", e))?;
+                // stale WAL/SHM belong to the OLD database — remove them so
+                // SQLite doesn't recover the restored DB with a foreign WAL.
+                let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+                let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+                println!("OK: database restored — {}", filename);
+                println!("pre-restore safety backup: {}", safety.to_string_lossy());
+                println!("NOTE: GUI app chal rahi ho to restart karein; ab ke CLI commands naye DB par chalenge");
+                Ok(())
+            }
+
+            "settings-get" => {
+                // v0.43.0: publish/backup config visibility. Sensitive
+                // values (token/password) MASKED — never print full secrets.
+                let conn = open_db();
+                if rest.is_empty() || rest[0].starts_with("--") {
+                    let mut stmt = conn
+                        .prepare("SELECT key, value FROM settings ORDER BY key")
+                        .map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map([], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                        })
+                        .map_err(|e| e.to_string())?;
+                    let mut any = false;
+                    for row in rows.flatten() {
+                        any = true;
+                        println!("{} = {}", row.0, mask_secret(&row.0, &row.1));
+                    }
+                    if !any {
+                        println!("(settings table khali hai)");
+                    }
+                    Ok(())
+                } else {
+                    let key = rest[0].trim().to_string();
+                    match commands::get_setting_val(&conn, &key) {
+                        Ok(v) => {
+                            println!("{} = {}", key, mask_secret(&key, &v));
+                            Ok(())
+                        }
+                        Err(_) => Err(format!("setting '{}' nahi mili", key)),
+                    }
+                }
+            }
+
+            "settings-set" => {
+                // v0.43.0: set a config value from CLI. Secrets are NOT
+                // echoed back in full (masked in the OK line).
+                if rest.len() < 2 || rest[0].starts_with("--") {
+                    return Err("usage: settings-set <key> <value>".into());
+                }
+                let key = rest[0].trim().to_string();
+                let value = rest[1].trim().to_string();
+                if key.is_empty() || key.contains(char::is_whitespace) {
+                    return Err("key mein whitespace nahi ho sakti".into());
+                }
+                let conn = open_db();
+                commands::set_setting_val(&conn, &key, &value).map_err(|e| e.to_string())?;
+                println!("OK: {} set (value: {})", key, mask_secret(&key, &value));
                 Ok(())
             }
 

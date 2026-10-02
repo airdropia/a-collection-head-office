@@ -272,6 +272,181 @@ pub fn import_from_csv(conn: &Connection, csv_content: &str) -> Result<(), Box<d
     Ok(())
 }
 
+// ============================================================
+// v0.43.0: CLI bulk import/export (catalog-build workflow)
+// ============================================================
+
+/// v0.43.0 report for product-import-csv (CLI bulk entry).
+pub struct ImportReport {
+    pub total_rows: usize,
+    pub imported: Vec<String>,
+    pub skipped_dupes: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+fn csv_opt_trim(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+/// v0.43.0: Bulk product import for new-catalog builds.
+/// CSV schema (13 cols; a header row starting with `sku` is skipped):
+///   sku,name,category,color,design,season,cost,sale,retail,brand,fabric,qty,purchase_price
+/// Duplicate SKUs are SKIPPED and reported; bad rows are reported — never a
+/// silent mid-file abort. Each valid row goes through catalog::add_product
+/// (the EXACT INSERT the GUI form + product-add CLI run), so the
+/// stock_quantity/qty_in_head_office lockstep holds automatically.
+pub fn import_products_csv(conn: &Connection, csv_path: &Path) -> Result<ImportReport, Box<dyn std::error::Error>> {
+    let file = fs::File::open(csv_path)?;
+    let mut rdr = ReaderBuilder::new().has_headers(false).from_reader(file);
+    let mut report = ImportReport {
+        total_rows: 0,
+        imported: Vec::new(),
+        skipped_dupes: Vec::new(),
+        failed: Vec::new(),
+    };
+
+    for (idx, result) in rdr.records().enumerate() {
+        let row_no = idx + 1;
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                report.failed.push(format!("row {}: csv parse: {}", row_no, e));
+                continue;
+            }
+        };
+        if record.is_empty() || record.iter().all(|c| c.trim().is_empty()) {
+            continue;
+        }
+        if record[0].trim().eq_ignore_ascii_case("sku") {
+            continue; // header row
+        }
+        if record.len() < 13 {
+            report.failed.push(format!("row {}: {} columns (need 13)", row_no, record.len()));
+            continue;
+        }
+        report.total_rows += 1;
+        let sku = record[0].trim().to_string();
+        let name = record[1].trim().to_string();
+        if sku.is_empty() || name.is_empty() {
+            report.failed.push(format!("row {}: sku and name must be non-empty", row_no));
+            continue;
+        }
+        let exists: Option<i64> = conn
+            .query_row("SELECT id FROM products WHERE sku = ?1", [&sku], |r| r.get(0))
+            .ok();
+        if exists.is_some() {
+            report.skipped_dupes.push(sku);
+            continue;
+        }
+        let parse_num = |label: &str, raw: &str, def: f64| -> Result<f64, String> {
+            let t = raw.trim();
+            if t.is_empty() {
+                return Ok(def);
+            }
+            t.parse::<f64>().map_err(|_| format!("{} '{}' is not numeric", label, t))
+        };
+        let cost = match parse_num("cost", &record[6], 0.0) {
+            Ok(v) => v,
+            Err(e) => { report.failed.push(format!("row {}: {}", row_no, e)); continue; }
+        };
+        let sale = match parse_num("sale", &record[7], 0.0) {
+            Ok(v) => v,
+            Err(e) => { report.failed.push(format!("row {}: {}", row_no, e)); continue; }
+        };
+        let retail = match parse_num("retail", &record[8], sale) {
+            Ok(v) => v,
+            Err(e) => { report.failed.push(format!("row {}: {}", row_no, e)); continue; }
+        };
+        let qty_raw = record[11].trim();
+        let qty: i64 = if qty_raw.is_empty() {
+            0
+        } else {
+            match qty_raw.parse::<i64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    report.failed.push(format!("row {}: qty '{}' is not an integer", row_no, qty_raw));
+                    continue;
+                }
+            }
+        };
+        if qty < 0 {
+            report.failed.push(format!("row {}: qty must be >= 0", row_no));
+            continue;
+        }
+        let purchase = match parse_num("purchase_price", &record[12], cost) {
+            Ok(v) => v,
+            Err(e) => { report.failed.push(format!("row {}: {}", row_no, e)); continue; }
+        };
+
+        let product = Product {
+            id: None,
+            sku: sku.clone(),
+            name,
+            category: csv_opt_trim(&record[2]),
+            color: csv_opt_trim(&record[3]),
+            design: csv_opt_trim(&record[4]),
+            season: csv_opt_trim(&record[5]),
+            cost_price: cost,
+            sale_price: sale,
+            purchase_price: purchase,
+            description: None,
+            tags: None,
+            stock_quantity: qty,
+            status: "active".to_string(),
+            images: "[]".to_string(),
+            supplier_id: None,
+            created_at: None,
+            updated_at: None,
+            product_code: None,
+            brand: csv_opt_trim(&record[9]),
+            fabric: csv_opt_trim(&record[10]),
+            size_info: None,
+            retail_price: Some(retail),
+            discount_price: None,
+            qty_in_head_office: Some(qty),
+            qty_with_agents: Some(0),
+            qty_sold: Some(0),
+            qty_reserved: Some(0),
+            profit_status: None,
+        };
+        match add_product(conn, &product) {
+            Ok(_) => report.imported.push(sku),
+            Err(e) => report.failed.push(format!("row {}: insert {}: {}", row_no, sku, e)),
+        }
+    }
+    Ok(report)
+}
+
+/// v0.43.0: Bulk product export — SAME 13-col schema as import_products_csv,
+/// so a CSV round-trip (export -> edit -> re-import) keeps working. Exports
+/// every product regardless of status (archived/sold_out included). Empty
+/// optional fields are written as empty cells.
+pub fn export_products_csv(conn: &Connection, csv_path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    let products = get_all_products(conn)?;
+    let mut wtr = WriterBuilder::new().from_path(csv_path)?;
+    wtr.write_record(&["sku", "name", "category", "color", "design", "season",
+        "cost", "sale", "retail", "brand", "fabric", "qty", "purchase_price"])?;
+    for p in &products {
+        wtr.write_record(&[
+            p.sku.clone(), p.name.clone(),
+            p.category.clone().unwrap_or_default(),
+            p.color.clone().unwrap_or_default(),
+            p.design.clone().unwrap_or_default(),
+            p.season.clone().unwrap_or_default(),
+            p.cost_price.to_string(),
+            p.sale_price.to_string(),
+            p.retail_price.map(|v| v.to_string()).unwrap_or_default(),
+            p.brand.clone().unwrap_or_default(),
+            p.fabric.clone().unwrap_or_default(),
+            p.stock_quantity.to_string(),
+            p.purchase_price.to_string(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(products.len())
+}
+
 pub fn process_and_save_image(src_path: &Path, app_images_dir: &Path, format_type: &str) -> Result<String, Box<dyn std::error::Error>> {
     fs::create_dir_all(app_images_dir)?;
     let uuid_str = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string();

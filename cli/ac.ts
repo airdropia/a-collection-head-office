@@ -242,7 +242,7 @@ function productsList(lowStockOnly: boolean) {
            COALESCE(qty_with_agents, 0) AS qwa,
            COALESCE(qty_sold, 0) AS qs,
            COALESCE(profit_status, 'in_head_office') AS pstatus
-    FROM products ${lowStockOnly ? "WHERE (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents,0)) <= 2 AND COALESCE(profit_status,'in_head_office') != 'sold_out'" : ""}
+    FROM products ${lowStockOnly ? "WHERE (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents,0)) <= 5 AND COALESCE(profit_status,'in_head_office') != 'sold_out' AND status = 'active'" : ""}
     ORDER BY id`).all() as any[];
 
   out(rows, () => {
@@ -325,7 +325,8 @@ function dashboard() {
   const lowStock = (db.query(`
     SELECT COUNT(*) AS c FROM products
     WHERE COALESCE(profit_status,'in_head_office') != 'sold_out'
-      AND (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents,0)) <= 2`).get() as any)?.c ?? 0;
+      AND status = 'active'
+      AND (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents,0)) <= 5`).get() as any)?.c ?? 0;
   const soldOut = (db.query(`SELECT COUNT(*) AS c FROM products WHERE COALESCE(profit_status,'x') = 'sold_out'`).get() as any)?.c ?? 0;
   const recentSales = (db.query(`SELECT COUNT(*) AS c FROM sales WHERE reversed = 0 AND sale_date >= date('now','-30 days')`).get() as any)?.c ?? 0;
 
