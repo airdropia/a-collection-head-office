@@ -22,6 +22,7 @@
 //!                              [--brand B] [--fabric F] [--color C] [--retail R]
 //!                              [--purchase P] [--desc D]
 //!   acollectionho stock-add <product_id> <qty> [--notes N]
+//!   acollectionho product-delete <sku> [--yes]  (never-sold products only)
 //!   acollectionho record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]
 //!   acollectionho undo-sale <sale_id>
 //!   acollectionho publish-catalog [--notes N]  (publish public catalog PWA to GitHub)
@@ -62,6 +63,10 @@ Products (v0.41.0 — new-maal entry, replaces removed Purchase Trips):\n\
   stock-add <product_id> <qty> [--notes N]\n\
               restock existing article (+/-; negative = correction).\n\
               moves qty_in_head_office in lockstep with stock_quantity.\n\
+  product-delete <sku> [--yes]\n\
+              remove a wrong/never-sold entry (smoke rows etc.).\n\
+              BLOCKED if any sale rows exist (audit trail) or agents\n\
+              hold stock; non-zero stock needs --yes confirm.\n\
 \n\
 Sales (v0.40.0 — the ONLY sales path, same logic as GUI):\n\
   record-sale <product_id> <qty> <unit_price> [--channel C] [--customer-id ID]\n\
@@ -110,13 +115,19 @@ struct Opts {
     desc: Option<String>,
     retail: Option<f64>,
     purchase: Option<f64>,
+    // v0.42.0 — product-delete confirm flag
+    yes: bool,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
-    let mut o = Opts { notes: None, sale_id: None, date: None, name: None, phone: None, location: None, channel: None, customer_id: None, paid: None, category: None, brand: None, fabric: None, color: None, desc: None, retail: None, purchase: None };
+    let mut o = Opts { notes: None, sale_id: None, date: None, name: None, phone: None, location: None, channel: None, customer_id: None, paid: None, category: None, brand: None, fabric: None, color: None, desc: None, retail: None, purchase: None, yes: false };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--yes" => {
+                // v0.42.0: boolean flag — does NOT consume the next arg.
+                o.yes = true;
+            }
             "--notes" => {
                 i += 1;
                 o.notes = args.get(i).cloned();
@@ -444,6 +455,61 @@ fn main() -> ExitCode {
                         println!("Notes: {}", n);
                     }
                 }
+                Ok(())
+            }
+
+            "product-delete" => {
+                // v0.42.0: CLI removal path for wrong/never-sold entries
+                // (smoke rows, galat darj). Guards BEFORE delete:
+                //  - any sales rows (incl. reversed audit rows) -> BLOCKED;
+                //    FK is ON DELETE RESTRICT anyway, and the audit trail is
+                //    non-negotiable — no flag bypasses this
+                //  - qty_with_agents > 0 -> BLOCKED (agent_ledger rows would
+                //    SET NULL and unlink history)
+                //  - stock != 0 -> requires --yes (units get freed)
+                if rest.is_empty() {
+                    return Err("usage: product-delete <sku> [--yes]".into());
+                }
+                let sku = rest[0].trim().to_string();
+                if sku.starts_with("--") {
+                    return Err("usage: product-delete <sku> [--yes]".into());
+                }
+                let o = parse_opts(&rest[1..]);
+                let conn = open_db();
+                let p = catalog::get_product_by_sku(&conn, &sku)
+                    .map_err(|_| format!("no product with SKU '{}' — 'products list' se sahi SKU dekhein", sku))?;
+                let pid = p.id.unwrap_or(0);
+                let sales_rows: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM sales WHERE product_id = ?1",
+                        [pid],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if sales_rows > 0 {
+                    return Err(format!(
+                        "product '{}' (#{}): {} sale row(s) hain (audit trail) — delete BLOCKED. Becha hua article CLI se delete nahi hota.",
+                        p.sku, pid, sales_rows
+                    ));
+                }
+                let agents_qty = p.qty_with_agents.unwrap_or(0);
+                if agents_qty > 0 {
+                    return Err(format!(
+                        "product '{}' (#{}): agents ke paas {} unit hain — pehle wapas karein; delete karne se agent ledger ka link toot jaye ga.",
+                        p.sku, pid, agents_qty
+                    ));
+                }
+                if p.stock_quantity != 0 && !o.yes {
+                    return Err(format!(
+                        "product '{}' (#{}): stock {} unit hai, delete par freed ho jaye gi. Confirm: product-delete {} --yes",
+                        p.sku, pid, p.stock_quantity, p.sku
+                    ));
+                }
+                catalog::delete_product(&conn, pid).map_err(|e| e.to_string())?;
+                println!(
+                    "OK: product #{} '{}' ({}) deleted — freed head-office stock: {}",
+                    pid, p.name, p.sku, p.stock_quantity
+                );
                 Ok(())
             }
 

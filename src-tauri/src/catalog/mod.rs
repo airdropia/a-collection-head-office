@@ -154,6 +154,17 @@ pub fn get_product_by_id(conn: &Connection, id: i64) -> Result<Product, rusqlite
     )
 }
 
+/// v0.42.0: resolve a product by its SKU (CLI product-delete entry point).
+/// Thin wrapper — id lookup reuses get_product_by_id's full 29-col mapping.
+pub fn get_product_by_sku(conn: &Connection, sku: &str) -> Result<Product, rusqlite::Error> {
+    let id: i64 = conn.query_row(
+        "SELECT id FROM products WHERE sku = ?1",
+        [sku],
+        |r| r.get(0),
+    )?;
+    get_product_by_id(conn, id)
+}
+
 pub fn add_product(conn: &Connection, product: &Product) -> Result<i64, rusqlite::Error> {
     let now = chrono::Utc::now().to_rfc3339();
     // v0.14.3: Persist retail_price + brand + fabric to products table.
