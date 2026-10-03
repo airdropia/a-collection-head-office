@@ -361,11 +361,27 @@ pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
         }
     }
 
-    // Reverse customer balance update (if there was an unpaid balance)
+    // Mark sale as reversed FIRST (v0.44.1 fix): the bucket recompute below
+    // walks the ledger and EXCLUDES reversed sales. In v0.44.0 the recompute
+    // ran before this UPDATE, making it a no-op — the cache stayed stale and
+    // was only healed by the next command's init_db auto-heal (caught in the
+    // 2026-10-03 drill: "[auto-heal] ... -2000 -> -10000" right after undo).
+    let undone_tag = format!(" [UNDONE {}]", now);
+    if let Err(e) = conn.execute(
+        "UPDATE sales SET reversed = 1, notes = COALESCE(notes, '') || ?3, updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![&now, sale_id, &undone_tag],
+    ) {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to mark sale as reversed: {}", e));
+    }
+
+    // Reverse customer khata caches (if the sale touched the khata).
     // v0.44.0: full waterfall recompute replaces the MAX(0, ...) clamp —
     // the clamp could silently eat a legitimate advance (negative net) and
     // drift the cache away from the ledger; the walk is exact.
-    if balance > 0.0 {
+    // v0.44.1: condition covers overpaid sales too (balance < 0 also fed
+    // the advance bucket); a fully-paid sale (balance == 0) is khata-neutral.
+    if balance != 0.0 {
         if let Some(cid) = customer_id {
             if let Err(e) = customers::recompute_customer_buckets(&conn, cid) {
                 let _ = conn.execute("ROLLBACK", []);
@@ -395,15 +411,8 @@ pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
         return Err(format!("Failed to update profit_status: {}", e));
     }
 
-    // Mark sale as reversed (soft delete — keep row for audit)
-    let undone_tag = format!(" [UNDONE {}]", now);
-    if let Err(e) = conn.execute(
-        "UPDATE sales SET reversed = 1, notes = COALESCE(notes, '') || ?3, updated_at = ?1 WHERE id = ?2",
-        rusqlite::params![&now, sale_id, &undone_tag],
-    ) {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to mark sale as reversed: {}", e));
-    }
+    // (v0.44.1: sale marked reversed earlier in this transaction — before
+    // the bucket recompute, so the walk sees the post-undo ledger state.)
 
     conn.execute("COMMIT", []).map_err(|e| {
         let _ = conn.execute("ROLLBACK", []);

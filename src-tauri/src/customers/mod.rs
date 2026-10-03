@@ -142,33 +142,39 @@ pub const CANONICAL_OUTSTANDING_SQL: &str = "
   + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
               WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'opening_debit'), 0.0)
   + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
-              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)";
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)
+  + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'advance_return'), 0.0)";
 
 // ============================================================
 // v0.44.0 — DUAL-BUCKET KHATA (udhaar_gross / advance_gross)
+// v0.44.1 — NO-NETTING rule (owner directive, Sami case)
 // ============================================================
 //
 // Owner directive (2026-10-02): net-only display was confusing — green
 // (lena hai) and red (dena hai) must BOTH be visible, per customer and
 // overall. Buckets are derived from the SAME ledger source of truth as
-// CANONICAL_OUTSTANDING_SQL via a waterfall walk:
+// CANONICAL_OUTSTANDING_SQL.
 //
-//   udhaar_gross  (GREEN) = soot/cash we gave, still un-recovered
-//   advance_gross (RED)   = advances/overpayments we hold, still un-settled
-//   outstanding_balance    = udhaar_gross - advance_gross (net, semantics
-//                           unchanged — equals the canonical aggregate)
+//   udhaar_gross  (GREEN) = real udhaar amount, still un-recovered
+//   advance_gross (RED)   = real advance/qarz amount, still un-settled
+//   outstanding_balance    = udhaar_gross - advance_gross (net, reference)
 //
-// Waterfall rules (owner-confirmed):
-//   * maal diya (sale balance B > 0): advance PEHLE khata hai
-//     (red -= min(B, red)); bachi raqam udhaar banti hai (green += rest)
-//   * paisa aaya (payment / negative adjustment P): udhaar PEHLE settle
-//     (green -= min(P, green)); excess advance banta hai (red += rest)
-//   * opening_debit / positive adjustment: green += amount
-//   * overpaid sale (balance < 0): cash-in jaisa treat hota hai
+// v0.44.0 shipped a waterfall with CROSS-BUCKET netting (advance consumed
+// udhaar, sales consumed advance). Real data proved it wrong: Sami had
+// 9,400 udhaar + 79,000 advance and the waterfall showed 0/69,600.
+// Owner rule (v0.44.1, GLOBAL — all customers):
 //
-// Math property: creation and cash-in events COMMUTE in this waterfall
-// (verified algebraically), so the final buckets are order-independent —
-// the chronological sort is for determinism only.
+//   * LENA and DENA are REAL amounts — they NEVER net each other
+//   * credit sale (balance > 0) / opening_debit / +adjustment -> GREEN
+//   * negative adjustment (advance liya) / overpaid sale (balance < 0)
+//     -> RED (green ko NAHI chhuste)
+//   * payment (real cash wasooli) -> GREEN kam hota hai, excess -> RED
+//   * advance_return (hum ne advance ke badle cash/maal diya) -> RED kam
+//
+// Net invariant: every event's net delta (green delta - red delta) equals
+// its canonical ledger contribution, so green - red == the canonical
+// aggregate EXACTLY (float noise only) — same guarantee as v0.44.0.
 
 #[derive(Debug, Clone, Copy)]
 pub struct CustomerBuckets {
@@ -191,9 +197,11 @@ pub fn compute_customer_buckets(
     customer_id: i64,
 ) -> Result<CustomerBuckets, String> {
     // events: (date, id, table_rank, kind, amount)
-    // kind 0 = plain udhaar-creation (opening_debit / +adjustment)
-    // kind 1 = cash-in (payment / -adjustment / overpaid sale)
-    // kind 2 = sale-creation (consumes advance first, remainder udhaar)
+    // v0.44.1 no-netting kinds:
+    //   kind 0 = green-only  (opening_debit / +adjustment / credit sale)
+    //   kind 1 = payment     (real cash wasooli: green first, excess red)
+    //   kind 2 = red-only    (-adjustment advance liya / overpaid sale)
+    //   kind 3 = advance_return (red settle — hum ne wapas diya)
     let mut events: Vec<(String, i64, i8, i8, f64)> = Vec::new();
 
     let mut stmt = conn
@@ -214,9 +222,12 @@ pub fn compute_customer_buckets(
     for r in sale_rows {
         let (id, date, balance) = r.map_err(|e| e.to_string())?;
         if balance > 0.0 {
-            events.push((date, id, 0, 2, balance));
+            // v0.44.1: credit sale is pure udhaar — it does NOT consume
+            // the advance bucket anymore (owner rule: no cross-netting).
+            events.push((date, id, 0, 0, balance));
         } else if balance < 0.0 {
-            events.push((date, id, 0, 1, -balance));
+            // overpaid sale = customer holds us cash -> pure advance
+            events.push((date, id, 0, 2, -balance));
         }
     }
 
@@ -244,9 +255,12 @@ pub fn compute_customer_buckets(
                 if amount >= 0.0 {
                     events.push((date, id, 1, 0, amount));
                 } else {
-                    events.push((date, id, 1, 1, -amount));
+                    // v0.44.1: advance liya — pure RED, green ko nahi khata
+                    // (Sami fix: 9,400 udhaar + 79,000 advance = 9,400/79,000)
+                    events.push((date, id, 1, 2, -amount));
                 }
             }
+            "advance_return" => events.push((date, id, 1, 3, amount)),
             _ => events.push((date, id, 1, 1, amount)), // payment / legacy NULL
         }
     }
@@ -259,10 +273,13 @@ pub fn compute_customer_buckets(
         match kind {
             0 => green += amount,
             1 => bucket_cash_in(amount, &mut green, &mut red),
+            2 => red += amount,
             _ => {
-                let consumed = amount.min(red);
-                red -= consumed;
-                green += amount - consumed;
+                // advance_return: settles RED only — never touches green.
+                // add_manual_entry_impl validates amount <= red up front,
+                // so the min() here is just belt-and-suspenders.
+                let settled = amount.min(red);
+                red -= settled;
             }
         }
     }
@@ -438,10 +455,12 @@ pub fn record_payment_impl(
     Ok(())
 }
 
-/// Add a manual ledger entry (opening_debit | adjustment).
+/// Add a manual ledger entry (opening_debit | adjustment | advance_return).
 /// Extracted verbatim from the add_customer_ledger_entry Tauri command.
 /// Sign convention: opening_debit amount must be > 0 (adds to balance);
-/// adjustment amount is signed (negative reduces balance — e.g. advance).
+/// adjustment amount is signed (negative = advance liya, +ve = correction);
+/// v0.44.1 advance_return amount must be > 0 (settles the RED bucket —
+/// hum ne advance wale customer ko cash/maal diya advance ke badle).
 pub fn add_manual_entry_impl(
     conn: &Connection,
     customer_id: i64,
@@ -450,9 +469,12 @@ pub fn add_manual_entry_impl(
     notes: Option<&str>,
     date: Option<&str>,
 ) -> Result<i64, String> {
-    if entry_type != "opening_debit" && entry_type != "adjustment" {
+    if entry_type != "opening_debit"
+        && entry_type != "adjustment"
+        && entry_type != "advance_return"
+    {
         return Err(format!(
-            "Invalid entry_type '{}'. Must be 'opening_debit' or 'adjustment'.",
+            "Invalid entry_type '{}'. Must be 'opening_debit', 'adjustment' or 'advance_return'.",
             entry_type
         ));
     }
@@ -462,6 +484,11 @@ pub fn add_manual_entry_impl(
     // adjustment can be zero — no-op, but rejected for consistency with GUI
     if entry_type == "adjustment" && amount == 0.0 {
         return Err("Adjustment amount cannot be zero.".to_string());
+    }
+    // v0.44.1: advance_return amount must be positive (the direction itself
+    // encodes the semantics — user never types a minus)
+    if entry_type == "advance_return" && amount <= 0.0 {
+        return Err("Advance return amount must be positive.".to_string());
     }
     let now = chrono::Utc::now().to_rfc3339();
     let entry_date = date.unwrap_or(&now);
@@ -479,6 +506,25 @@ pub fn add_manual_entry_impl(
     {
         let _ = conn.execute("ROLLBACK", []);
         return Err(format!("Customer not found: {}", customer_id));
+    }
+
+    // v0.44.1: advance_return cannot exceed the customer's current advance
+    // bucket. Fresh compute inside the transaction (never trust the cache).
+    if entry_type == "advance_return" {
+        let b = match compute_customer_buckets(conn, customer_id) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(e);
+            }
+        };
+        if amount > b.advance_gross + 0.004 {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(format!(
+                "Advance return (Rs. {:.0}) exceeds the customer's advance bucket (Rs. {:.0}).",
+                amount, b.advance_gross
+            ));
+        }
     }
 
     let res = conn.execute(

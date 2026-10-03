@@ -50,7 +50,7 @@ export default function Customers() {
   // v0.34.0: Direction of ledger entry — 'udhaar' (customer owes us, positive) or
   // 'advance' (we owe customer / they paid in advance, negative). Sign is derived
   // from direction so the user never types a minus sign.
-  const [ledgerDirection, setLedgerDirection] = useState<'udhaar' | 'advance'>('udhaar')
+  const [ledgerDirection, setLedgerDirection] = useState<'udhaar' | 'advance' | 'advance_return'>('udhaar')
   const [ledgerEntryType, setLedgerEntryType] = useState<'opening_debit' | 'adjustment'>('opening_debit')
   const [ledgerEntryAmount, setLedgerEntryAmount] = useState(0)
   const [ledgerEntryNotes, setLedgerEntryNotes] = useState('')
@@ -143,13 +143,16 @@ export default function Customers() {
           saleId: null,
         })
       } else {
-        // We owe the customer — record a negative adjustment to settle our debt
+        // v0.44.1: settle the RED bucket via the explicit advance_return
+        // entry type (no-netting rule). A negative adjustment would now
+        // mean "advance liya" (DENA barhta) — the settle direction is its
+        // own entry type so DENA kam hota hai, udhaar untouched.
         await invoke('add_customer_ledger_entry', {
           customerId: paymentCustomer.id,
-          entryType: 'adjustment',
-          amount: -Math.abs(paymentAmount),
+          entryType: 'advance_return',
+          amount: Math.abs(paymentAmount),
           entryDate: null,
-          notes: paymentNotes || 'Settled advance debt (hum ne wapas diya)',
+          notes: paymentNotes || 'Advance settle (hum ne wapas diya)',
         })
       }
       setShowPaymentModal(false)
@@ -175,7 +178,8 @@ export default function Customers() {
 
   // v0.29.0: Open modal for adding a manual ledger entry (opening_debit or adjustment)
   // v0.34.0: direction defaults to 'udhaar'; caller can preset 'advance' for negative balances
-  const handleOpenLedgerEntryModal = (customer: Customer, type: 'opening_debit' | 'adjustment', direction: 'udhaar' | 'advance' = 'udhaar') => {
+  // v0.44.1: third direction 'advance_return' (settle RED bucket)
+  const handleOpenLedgerEntryModal = (customer: Customer, type: 'opening_debit' | 'adjustment', direction: 'udhaar' | 'advance' | 'advance_return' = 'udhaar') => {
     setPaymentCustomer(customer)
     setLedgerEntryType(type)
     setLedgerDirection(direction)
@@ -187,20 +191,28 @@ export default function Customers() {
   }
 
   // v0.34.0: Save the manual ledger entry. Sign comes from direction, not user input:
-  //   udhaar  → customer owes us → stored positive (opening_debit) or +adjustment
-  //   advance → we owe customer (advance payment / maal wapas) → adjustment stays
-  //             negative. opening_debit cannot be negative per backend invariant, so
-  //             an advance opening balance is stored as a negative 'adjustment'.
+  //   udhaar         → customer owes us → stored positive (opening_debit) or +adjustment
+  //   advance        → customer gave US advance (qarz/overpay) → negative adjustment
+  //                    (v0.44.1 relabel: ye DENA barhata hai, kisi udhaar ko nahi khata)
+  //   advance_return → hum ne advance ke badle cash/maal diya → stored as positive
+  //                    'advance_return' entry; backend validates it against the RED bucket
+  //                    (v0.44.1: opening_debit cannot be negative per backend invariant, so
+  //                    an advance opening balance is stored as a negative 'adjustment')
   const handleSaveLedgerEntry = async () => {
     if (!paymentCustomer?.id) return
-    const signedAmount = ledgerDirection === 'udhaar' ? Math.abs(ledgerEntryAmount) : -Math.abs(ledgerEntryAmount)
+    const signedAmount = ledgerDirection === 'advance' ? -Math.abs(ledgerEntryAmount) : Math.abs(ledgerEntryAmount)
     if (ledgerEntryAmount <= 0) {
       alert('Amount must be greater than zero.')
       return
     }
     // Backend invariant: opening_debit must be positive. An advance-direction
-    // entry is therefore always recorded as an 'adjustment' (signed amount).
-    const backendType = ledgerDirection === 'advance' ? 'adjustment' : ledgerEntryType
+    // entry is therefore always recorded as an 'adjustment' (signed amount);
+    // the settle direction records an 'advance_return' (positive amount).
+    const backendType = ledgerDirection === 'advance'
+      ? 'adjustment'
+      : ledgerDirection === 'advance_return'
+        ? 'advance_return'
+        : ledgerEntryType
     try {
       // Convert date to ISO 8601 (with time)
       const isoDate = ledgerEntryDate
@@ -690,14 +702,15 @@ export default function Customers() {
               ) : (
                 balanceHistory.map((entry, i) => {
                   // v0.29.0: Color code by entry type
-                  const isDebit = entry.amount > 0  // sale, opening_debit, +adjustment
-                  const isManualEntry = entry.entry_type === 'opening_debit' || entry.entry_type === 'adjustment' || entry.entry_type === 'payment'
+                  const isDebit = entry.amount > 0  // sale, opening_debit, +adjustment, advance_return (+net)
+                  const isManualEntry = entry.entry_type === 'opening_debit' || entry.entry_type === 'adjustment' || entry.entry_type === 'payment' || entry.entry_type === 'advance_return'
                   return (
                     <div key={i} className={`flex items-start gap-3 p-3 rounded-lg border ${
                       entry.entry_type === 'sale' ? 'bg-slate-950/50 border-gray-800' :
                       entry.entry_type === 'payment' ? 'bg-emerald-950/30 border-emerald-800/50' :
                       entry.entry_type === 'opening_debit' ? 'bg-amber-950/30 border-amber-800/50' :
                       entry.entry_type === 'adjustment' ? 'bg-violet-950/30 border-violet-800/50' :
+                      entry.entry_type === 'advance_return' ? 'bg-sky-950/30 border-sky-800/50' :
                       'bg-slate-950/50 border-gray-800'
                     }`}>
                       <div className={`mt-1 w-2 h-2 rounded-full ${
@@ -705,6 +718,7 @@ export default function Customers() {
                         entry.entry_type === 'payment' ? 'bg-emerald-400' :
                         entry.entry_type === 'opening_debit' ? 'bg-amber-500' :
                         entry.entry_type === 'adjustment' ? 'bg-violet-400' :
+                        entry.entry_type === 'advance_return' ? 'bg-sky-400' :
                         'bg-gray-400'
                       }`}></div>
                       <div className="flex-1 min-w-0">
@@ -820,8 +834,20 @@ export default function Customers() {
                         ? 'bg-red-900/30 border-red-600/60'
                         : 'bg-slate-950 border-gray-800 hover:border-gray-600'
                     }`}>
-                    <p className={`text-sm font-bold ${ledgerDirection === 'advance' ? 'text-red-300' : 'text-gray-300'}`}>Hum customer ko dete hain</p>
-                    <p className="text-[10px] text-gray-500">Advance payment / maal wapas — HO ko dena hai</p>
+                    <p className={`text-sm font-bold ${ledgerDirection === 'advance' ? 'text-red-300' : 'text-gray-300'}`}>Advance liya (qarz / zyada paisa)</p>
+                    <p className="text-[10px] text-gray-500">Customer ne hum ko diya — DENA barhega (udhaar nahi katеga)</p>
+                  </button>
+                  {/* v0.44.1: third direction — explicit RED settle */}
+                  <button
+                    type="button"
+                    onClick={() => setLedgerDirection('advance_return')}
+                    className={`col-span-2 rounded-lg border text-left transition-all p-3 ${
+                      ledgerDirection === 'advance_return'
+                        ? 'bg-sky-900/30 border-sky-600/60'
+                        : 'bg-slate-950 border-gray-800 hover:border-gray-600'
+                    }`}>
+                    <p className={`text-sm font-bold ${ledgerDirection === 'advance_return' ? 'text-sky-300' : 'text-gray-300'}`}>Advance wapas diya (settle)</p>
+                    <p className="text-[10px] text-gray-500">Hum ne advance ke badle cash/maal diya — DENA kam hoga</p>
                   </button>
                 </div>
               </div>
@@ -832,7 +858,7 @@ export default function Customers() {
               )}
               {ledgerEntryType === 'adjustment' && (
                 <p className="text-xs text-gray-400 bg-slate-950/50 border border-gray-800 rounded p-2">
-                  For corrections, maal wapas, or error fixes. Direction above decides the sign.
+                  For corrections and error fixes. Direction above decides the side (green/red).
                 </p>
               )}
               <div>
@@ -848,7 +874,7 @@ export default function Customers() {
                   className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
                 />
                 <p className="text-[10px] text-gray-600 mt-1">
-                  New balance: <span className="text-gray-400">{fmtMoney((paymentCustomer.outstanding_balance || 0) + (ledgerDirection === 'udhaar' ? Math.abs(ledgerEntryAmount) : -Math.abs(ledgerEntryAmount)))}</span>
+                  New balance: <span className="text-gray-400">{fmtMoney((paymentCustomer.outstanding_balance || 0) + (ledgerDirection === 'advance' ? -Math.abs(ledgerEntryAmount) : Math.abs(ledgerEntryAmount)))}</span>
                 </p>
               </div>
               <div>

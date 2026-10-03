@@ -16,6 +16,7 @@
 //! Usage:
 //!   acollectionho pay-customer <customer_id> <amount> [--notes N] [--sale ID]
 //!   acollectionho manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]
+//!   acollectionho advance-return <customer_id> <amount> [--notes N] [--date D]
 //!   acollectionho customer-add --name N [--phone P] [--location L] [--notes N]
 //!   acollectionho customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]
 //!   acollectionho product-add <sku> <name> <cost> <sale> [qty] [--category C]
@@ -59,6 +60,7 @@ fn print_usage() {
 Writes (reuse the GUI app's exact business logic):\n\
   pay-customer <customer_id> <amount> [--notes N] [--sale ID]\n\
   manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]\n\
+  advance-return <customer_id> <amount> [--notes N] [--date D]\n\
   customer-add --name N [--phone P] [--location L] [--notes N]\n\
   customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]\n\
 \n\
@@ -364,6 +366,36 @@ fn main() -> ExitCode {
                 println!(
                     "OK: {} entry Rs. {:.0} recorded for customer #{} (ledger id {})",
                     etype, amount, cid, id
+                );
+                Ok(())
+            }
+
+            "advance-return" => {
+                // v0.44.1: settle the RED bucket — hum ne advance wale customer
+                // ko cash/maal diya advance ke badle. NO cross-bucket netting:
+                // ye sirf advance_gross kam karta hai, udhaar ko nahi chhoota.
+                if rest.len() < 2 {
+                    return Err("usage: advance-return <customer_id> <amount> [--notes N] [--date D]".into());
+                }
+                let cid: i64 = rest[0]
+                    .parse()
+                    .map_err(|_| "customer_id must be numeric".to_string())?;
+                let amount: f64 = rest[1].parse().map_err(|_| {
+                    "amount must be numeric (positive)".to_string()
+                })?;
+                let o = parse_opts(&rest[2..]);
+                let conn = open_db();
+                let id = customers::add_manual_entry_impl(
+                    &conn,
+                    cid,
+                    "advance_return",
+                    amount,
+                    o.notes.as_deref(),
+                    o.date.as_deref(),
+                )?;
+                println!(
+                    "OK: advance_return Rs. {:.0} recorded for customer #{} (ledger id {})",
+                    amount, cid, id
                 );
                 Ok(())
             }

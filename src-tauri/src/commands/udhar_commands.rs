@@ -135,6 +135,16 @@ pub async fn get_customer_balance_history(
                 };
                 (d, *amount) // signed; can be negative
             }
+            // v0.44.1: advance settle — hum ne advance ke badle cash/maal diya.
+            // Net delta +amount (DENA kam hota hai), history me +ve dikhega.
+            "advance_return" => {
+                let d = if notes.is_empty() {
+                    format!("Advance wapas diya: Rs. {:.0}", amount)
+                } else {
+                    format!("Advance wapas diya: {} (Rs. {:.0})", notes, amount)
+                };
+                (d, *amount)
+            }
             _ => {
                 // payment (existing behavior)
                 let d = if notes.is_empty() {
@@ -206,9 +216,12 @@ pub async fn add_customer_ledger_entry(
     notes: Option<String>,
 ) -> Result<i64, String> {
     // Validate entry_type
-    if entry_type != "opening_debit" && entry_type != "adjustment" {
+    if entry_type != "opening_debit"
+        && entry_type != "adjustment"
+        && entry_type != "advance_return"
+    {
         return Err(format!(
-            "Invalid entry_type '{}'. Must be 'opening_debit' or 'adjustment'.",
+            "Invalid entry_type '{}'. Must be 'opening_debit', 'adjustment' or 'advance_return'.",
             entry_type
         ));
     }
@@ -273,6 +286,37 @@ pub async fn update_customer_ledger_entry(
         let _ = conn.execute("ROLLBACK", []);
         return Err("Adjustment amount cannot be zero.".to_string());
     }
+    // v0.44.1: advance_return edits must not over-settle the RED bucket.
+    // Neutralize this entry first (amount=0 is a no-op event in the walk)
+    // so the check sees the customer's advance WITHOUT this row; the real
+    // UPDATE below then writes the new amount. Rollback restores on error.
+    if entry_type == "advance_return" {
+        if amount <= 0.0 {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err("Advance return amount must be positive.".to_string());
+        }
+        if let Err(e) = conn.execute(
+            "UPDATE customer_payments SET amount = 0 WHERE id = ?1",
+            rusqlite::params![entry_id],
+        ) {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(format!("Failed to neutralize entry: {}", e));
+        }
+        let b = match customers::compute_customer_buckets(&conn, customer_id) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(e);
+            }
+        };
+        if amount > b.advance_gross + 0.004 {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(format!(
+                "Advance return (Rs. {:.0}) exceeds the customer's advance bucket (Rs. {:.0}).",
+                amount, b.advance_gross
+            ));
+        }
+    }
 
     // Update the entry
     let date_clause = if let Some(d) = &entry_date {
@@ -309,7 +353,10 @@ pub async fn update_customer_ledger_entry(
     // Recompute customer's khata caches (net + both buckets) from all
     // entries — v0.44.0 dual-bucket recompute replaces the old net-only
     // sum (which also had a clamp + missed the reversed filter).
-    customers::recompute_customer_buckets(&conn, customer_id)?;
+    if let Err(e) = customers::recompute_customer_buckets(&conn, customer_id) {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to update khata buckets: {}", e));
+    }
 
     conn.execute("COMMIT", []).map_err(|e| {
         let _ = conn.execute("ROLLBACK", []);
