@@ -287,12 +287,13 @@ export default function Customers() {
     }
   }
 
-  // v0.26.0: Total outstanding across all customers (net — can be negative if
-  // we owe customers more than they owe us)
-  const totalOutstanding = customers.reduce((s, c) => s + (c.outstanding_balance || 0), 0)
-  const customersWithUdhar = customers.filter(c => (c.outstanding_balance || 0) > 0).length
-  // v0.34.0: customers with negative balance — we owe them (advance/maal wapas)
-  const customersWeOwe = customers.filter(c => (c.outstanding_balance || 0) < 0).length
+  // v0.44.0: DUAL-BUCKET totals (owner directive: green/red BOTH visible,
+  // separately — net alone hid the other side). Net kept for reference.
+  const totalUdhaar = customers.reduce((s, c) => s + (c.udhaar_gross || 0), 0)
+  const totalAdvance = customers.reduce((s, c) => s + (c.advance_gross || 0), 0)
+  const totalOutstanding = totalUdhaar - totalAdvance
+  const customersWithUdhar = customers.filter(c => (c.udhaar_gross || 0) > 0.004).length
+  const customersWeOwe = customers.filter(c => (c.advance_gross || 0) > 0.004).length
 
   // Filters
   const filteredCustomers = customers.filter(c => 
@@ -319,40 +320,41 @@ export default function Customers() {
         </button>
       </div>
 
-      {/* v0.34.0: Udhar Summary Bar — NET balance with red/green direction.
-          Positive net  = customers owe us  (green, HO ko lena hai)
-          Negative net  = we owe customers  (red, HO ko dena hai)
-          Shown whenever net is non-zero, in either direction. */}
-      {totalOutstanding !== 0 && (
-        <div className={`glass-card p-4 mb-4 flex items-center justify-between ${(
-          totalOutstanding > 0
-            ? 'bg-emerald-900/10 border-emerald-700/30'
-            : 'bg-red-900/10 border-red-700/30'
-        )}`}>
+      {/* v0.44.0: Udhar Summary Bar — BOTH buckets side by side, always visible.
+          GREEN (lena hai)  = sum of udhaar_gross   (soot/cash diya, wasool baqi)
+          RED   (dena hai)  = sum of advance_gross  (advance/overpay held)
+          Net (green - red) chhoti line me — the two buckets tell the real story. */}
+      <div className="glass-card p-4 mb-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className={`p-4 rounded-lg border flex items-center justify-between ${
+          'bg-emerald-900/10 border-emerald-700/30'
+        }`}>
           <div className="flex items-center gap-3">
-            <Wallet className={totalOutstanding > 0 ? 'text-emerald-400' : 'text-red-400'} size={24} />
+            <Wallet className="text-emerald-400" size={28} />
             <div>
-              {totalOutstanding > 0 ? (
-                <>
-                  <p className="text-sm text-emerald-300">HO ko lena hai (Udhar)</p>
-                  <p className="text-3xl font-bold text-emerald-400">{fmtMoney(totalOutstanding)}</p>
-                </>
-              ) : (
-                <>
-                  <p className="text-sm text-red-300">HO ko dena hai (Advance/Wapas)</p>
-                  <p className="text-3xl font-bold text-red-400">{fmtMoney(-totalOutstanding)}</p>
-                </>
-              )}
+              <p className="text-sm font-semibold text-emerald-300">HO ko LENA hai (Udhar)</p>
+              <p className="text-xs text-gray-400">{customersWithUdhar} customer{customersWithUdhar !== 1 ? 's' : ''} par udhar</p>
             </div>
           </div>
-          <div className="text-right">
-            <p className="text-xs text-gray-500">{customersWithUdhar} customer{customersWithUdhar !== 1 ? 's' : ''} with udhar</p>
-            {customersWeOwe > 0 && (
-              <p className="text-xs text-gray-500">{customersWeOwe} customer{customersWeOwe !== 1 ? 's' : ''} we owe</p>
-            )}
-          </div>
+          <p className="text-3xl md:text-4xl font-extrabold text-emerald-400 tracking-tight">{fmtMoney(totalUdhaar)}</p>
         </div>
-      )}
+        <div className="p-4 rounded-lg border bg-red-900/10 border-red-700/30 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Wallet className="text-red-400" size={28} />
+            <div>
+              <p className="text-sm font-semibold text-red-300">HO ko DENA hai (Advance)</p>
+              <p className="text-xs text-gray-400">{customersWeOwe} customer{customersWeOwe !== 1 ? 's' : ''} ko dena hai</p>
+            </div>
+          </div>
+          <p className="text-3xl md:text-4xl font-extrabold text-red-400 tracking-tight">{fmtMoney(totalAdvance)}</p>
+        </div>
+        <div className="md:col-span-2 text-center text-sm text-gray-400">
+          Net khata: <span className={`font-bold ${totalOutstanding > 0 ? 'text-emerald-300' : totalOutstanding < 0 ? 'text-red-300' : 'text-gray-300'}`}>
+            {totalOutstanding > 0 ? `HO ko lena hai ${fmtMoney(totalOutstanding)}`
+              : totalOutstanding < 0 ? `HO ko dena hai ${fmtMoney(-totalOutstanding)}`
+              : 'settled (net zero)'}
+          </span>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Customers List (Left 1/3) */}
@@ -383,20 +385,24 @@ export default function Customers() {
                   }`}
                 >
                   <div className="space-y-1 flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-semibold text-white">{c.name}</p>
-                      {/* v0.34.0: balance badge — green udhar, red advance (we owe them).
-                          Previously negative balances showed nothing (hidden debt). */}
-                      {(c.outstanding_balance || 0) > 0 && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-300 border border-emerald-700/50 font-bold whitespace-nowrap">
-                          Udhar: {fmtMoney(c.outstanding_balance || 0)}
-                        </span>
-                      )}
-                      {(c.outstanding_balance || 0) < 0 && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900/50 text-red-300 border border-red-700/50 font-bold whitespace-nowrap">
-                          Dene hain: {fmtMoney(-(c.outstanding_balance || 0))}
-                        </span>
-                      )}
+                      {/* v0.44.0: BOTH bucket badges always visible (green lena /
+                          red dena) — net-only badges hid one side of the khata. */}
+                      <span className={`text-xs px-1.5 py-0.5 rounded border font-bold whitespace-nowrap ${
+                        (c.udhaar_gross || 0) > 0.004
+                          ? 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50'
+                          : 'bg-slate-900/50 text-gray-500 border-gray-800'
+                      }`}>
+                        Lena: {fmtMoney(c.udhaar_gross || 0)}
+                      </span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded border font-bold whitespace-nowrap ${
+                        (c.advance_gross || 0) > 0.004
+                          ? 'bg-red-900/50 text-red-300 border-red-700/50'
+                          : 'bg-slate-900/50 text-gray-500 border-gray-800'
+                      }`}>
+                        Dena: {fmtMoney(c.advance_gross || 0)}
+                      </span>
                     </div>
                     <p className="text-xs text-gray-400 flex items-center"><Phone size={10} className="mr-1" />{c.phone || '-'}</p>
                   </div>
@@ -416,14 +422,14 @@ export default function Customers() {
                     {c.id && (
                       <>
                         <button 
-                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'opening_debit', (c.outstanding_balance || 0) < 0 ? 'advance' : 'udhaar'); }}
+                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'opening_debit', (c.udhaar_gross || 0) > (c.advance_gross || 0) ? 'udhaar' : 'advance'); }}
                           className="text-amber-400 hover:text-amber-300 transition-colors p-1"
                           title="Add Opening Balance (purana udhar / advance)"
                         >
                           <BookOpen size={14} />
                         </button>
                         <button 
-                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'adjustment', (c.outstanding_balance || 0) < 0 ? 'advance' : 'udhaar'); }}
+                          onClick={(e) => { e.stopPropagation(); handleOpenLedgerEntryModal(c, 'adjustment', (c.udhaar_gross || 0) > (c.advance_gross || 0) ? 'udhaar' : 'advance'); }}
                           className="text-violet-400 hover:text-violet-300 transition-colors p-1"
                           title="Add Adjustment (maal wapas / correction)"
                         >
@@ -488,6 +494,19 @@ export default function Customers() {
                   <div className="space-y-1">
                     <p className="text-xs text-gray-400 uppercase font-semibold">Location</p>
                     <p className="text-gray-200">{activeCustomer.location || 'N/A'}</p>
+                  </div>
+                </div>
+
+                {/* v0.44.0: Khata block — BOTH buckets in BIG fonts (owner:
+                    weak eyesight + both sides must always be visible). */}
+                <div className="grid grid-cols-2 gap-4 border-t border-gray-800 pt-4">
+                  <div className="p-4 rounded-lg border bg-emerald-900/10 border-emerald-700/30">
+                    <p className="text-sm font-semibold text-emerald-300 uppercase">Lena hai (Udhar)</p>
+                    <p className="text-3xl font-extrabold text-emerald-400 tracking-tight mt-1">{fmtMoney(activeCustomer.udhaar_gross || 0)}</p>
+                  </div>
+                  <div className="p-4 rounded-lg border bg-red-900/10 border-red-700/30">
+                    <p className="text-sm font-semibold text-red-300 uppercase">Dena hai (Advance)</p>
+                    <p className="text-3xl font-extrabold text-red-400 tracking-tight mt-1">{fmtMoney(activeCustomer.advance_gross || 0)}</p>
                   </div>
                 </div>
 
@@ -598,13 +617,24 @@ export default function Customers() {
                 <p className="text-base font-semibold text-white">{paymentCustomer.name}</p>
                 <p className="text-xs text-gray-500">{paymentCustomer.phone || 'No phone'}</p>
               </div>
+              {/* v0.44.0: both buckets shown separately in the payment modal */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-lg p-3 border bg-emerald-900/10 border-emerald-700/30">
+                  <span className="text-xs font-semibold text-emerald-300">Lena hai (Udhar)</span>
+                  <p className="text-xl font-extrabold text-emerald-400">{fmtMoney(paymentCustomer.udhaar_gross || 0)}</p>
+                </div>
+                <div className="rounded-lg p-3 border bg-red-900/10 border-red-700/30">
+                  <span className="text-xs font-semibold text-red-300">Dena hai (Advance)</span>
+                  <p className="text-xl font-extrabold text-red-400">{fmtMoney(paymentCustomer.advance_gross || 0)}</p>
+                </div>
+              </div>
               <div className={`rounded-lg p-3 flex justify-between items-center border ${
                 (paymentCustomer.outstanding_balance || 0) >= 0
                   ? 'bg-amber-900/20 border-amber-700/50'
                   : 'bg-red-900/20 border-red-700/50'
               }`}>
                 <span className={`text-sm ${(paymentCustomer.outstanding_balance || 0) >= 0 ? 'text-amber-300' : 'text-red-300'}`}>
-                  {(paymentCustomer.outstanding_balance || 0) >= 0 ? 'Outstanding Balance' : 'Hum in ko dete hain'}
+                  Net Outstanding
                 </span>
                 <span className={`text-lg font-bold ${(paymentCustomer.outstanding_balance || 0) >= 0 ? 'text-amber-400' : 'text-red-400'}`}>
                   {fmtMoney(Math.abs(paymentCustomer.outstanding_balance || 0))}
@@ -713,17 +743,27 @@ export default function Customers() {
                 })
               )}
             </div>
-            <div className="p-4 border-t border-gray-800 bg-slate-950/40 flex justify-between items-center">
-              {/* v0.34.0: red/green net balance — direction visible at a glance */}
-              <span className="text-sm text-gray-400">Current Outstanding:</span>
-              <span className={`text-lg font-bold ${
-                (paymentCustomer.outstanding_balance || 0) > 0 ? 'text-emerald-400' :
-                (paymentCustomer.outstanding_balance || 0) < 0 ? 'text-red-400' : 'text-gray-400'
-              }`}>
-                {(paymentCustomer.outstanding_balance || 0) < 0
-                  ? `Dene hain: ${fmtMoney(-(paymentCustomer.outstanding_balance || 0))}`
-                  : fmtMoney(paymentCustomer.outstanding_balance || 0)}
-              </span>
+            <div className="p-4 border-t border-gray-800 bg-slate-950/40">
+              {/* v0.44.0: BOTH buckets in the khata footer — big, separate */}
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm font-semibold text-emerald-300">Lena hai (Udhar)</span>
+                <span className="text-xl font-extrabold text-emerald-400">{fmtMoney(paymentCustomer.udhaar_gross || 0)}</span>
+              </div>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm font-semibold text-red-300">Dena hai (Advance)</span>
+                <span className="text-xl font-extrabold text-red-400">{fmtMoney(paymentCustomer.advance_gross || 0)}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-400">Net:</span>
+                <span className={`text-base font-bold ${
+                  (paymentCustomer.outstanding_balance || 0) > 0 ? 'text-emerald-400' :
+                  (paymentCustomer.outstanding_balance || 0) < 0 ? 'text-red-400' : 'text-gray-400'
+                }`}>
+                  {(paymentCustomer.outstanding_balance || 0) < 0
+                    ? `HO ko dena hai ${fmtMoney(-(paymentCustomer.outstanding_balance || 0))}`
+                    : fmtMoney(paymentCustomer.outstanding_balance || 0)}
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -745,20 +785,16 @@ export default function Customers() {
                 <p className="text-base font-semibold text-white">{paymentCustomer.name}</p>
                 <p className="text-xs text-gray-500">{paymentCustomer.phone || 'No phone'}</p>
               </div>
-              {/* v0.34.0: red/green current balance — mirrors card badge colors */}
-              <div className={`rounded-lg p-3 flex justify-between items-center border ${
-                (paymentCustomer.outstanding_balance || 0) < 0
-                  ? 'bg-red-900/20 border-red-700/50'
-                  : 'bg-amber-900/20 border-amber-700/50'
-              }`}>
-                <span className={`text-sm ${(paymentCustomer.outstanding_balance || 0) < 0 ? 'text-red-300' : 'text-amber-300'}`}>
-                  Current Outstanding
-                </span>
-                <span className={`text-lg font-bold ${(paymentCustomer.outstanding_balance || 0) < 0 ? 'text-red-400' : 'text-amber-400'}`}>
-                  {(paymentCustomer.outstanding_balance || 0) < 0
-                    ? `Dene hain: ${fmtMoney(-(paymentCustomer.outstanding_balance || 0))}`
-                    : fmtMoney(paymentCustomer.outstanding_balance || 0)}
-                </span>
+              {/* v0.44.0: both buckets shown separately — mirrors card badges */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-lg p-3 border bg-emerald-900/10 border-emerald-700/30">
+                  <span className="text-xs font-semibold text-emerald-300">Lena hai (Udhar)</span>
+                  <p className="text-xl font-extrabold text-emerald-400">{fmtMoney(paymentCustomer.udhaar_gross || 0)}</p>
+                </div>
+                <div className="rounded-lg p-3 border bg-red-900/10 border-red-700/30">
+                  <span className="text-xs font-semibold text-red-300">Dena hai (Advance)</span>
+                  <p className="text-xl font-extrabold text-red-400">{fmtMoney(paymentCustomer.advance_gross || 0)}</p>
+                </div>
               </div>
               {/* v0.34.0: Direction chooser — the core fix. Which way does the money go?
                   Sign is derived from this, user never types a minus. */}

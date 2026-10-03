@@ -4,14 +4,14 @@
 //! Behavior unchanged — only file structure modified.
 
 use crate::catalog::{self, Product};
-use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, BestSellerItem};
+use crate::commands::{get_setting_val, set_setting_val, DbState};
 use crate::customers::{self, Customer};
-use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
+use crate::inventory::{self, BestSellerItem, DeadStockItem, InventorySummary, LowStockItem};
+use crate::reports::{self, CustomerSummaryReport, InventoryReport, SalesReport};
 use crate::utils;
-use crate::commands::{DbState, set_setting_val, get_setting_val};
-use tauri::async_runtime::Mutex;
+use rusqlite::{params, Connection};
 use std::path::Path;
-use rusqlite::{Connection, params};
+use tauri::async_runtime::Mutex;
 use tauri::State;
 
 // ============================================================
@@ -63,7 +63,8 @@ pub fn record_sale_impl(
     // sales row doesn't. BEGIN IMMEDIATE acquires a RESERVED lock so the
     // whole "check stock → insert ledger → update product → insert sale →
     // update profit_status" sequence is atomic.
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| e.to_string())?;
 
     // Helper closure to rollback on error and convert rusqlite::Error to String.
     // Used for the early-return paths below.
@@ -147,20 +148,23 @@ pub fn record_sale_impl(
     } else {
         "in_head_office"
     };
-    try_or_rollback!(conn.execute(
-        "UPDATE products SET profit_status = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![new_status, &now, product_id],
-    ).map_err(|e| e.to_string()));
+    try_or_rollback!(conn
+        .execute(
+            "UPDATE products SET profit_status = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![new_status, &now, product_id],
+        )
+        .map_err(|e| e.to_string()));
 
     // v0.26.0: If customer_id is provided and there's an unpaid balance,
-    // increase the customer's outstanding_balance by the sale's balance.
-    // This keeps the khata (credit) tracking in sync.
+    // keep the khata in sync. v0.44.0: net + both buckets rewritten from
+    // the ledger waterfall (was: incremental outstanding_balance += balance) —
+    // so a sale against an advance consumes the RED bucket first (owner rule).
     if balance > 0.0 {
         if let Some(cid) = customer_id {
-            try_or_rollback!(conn.execute(
-                "UPDATE customers SET outstanding_balance = outstanding_balance + ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![balance, &now, cid],
-            ).map_err(|e| e.to_string()));
+            if let Err(e) = customers::recompute_customer_buckets(&conn, cid) {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(format!("Failed to update khata buckets: {}", e));
+            }
         }
     }
 
@@ -235,46 +239,62 @@ pub async fn record_sale(
 /// - Has already been reversed
 /// - Has customer payments recorded against it (those would need to be
 ///   deleted first — caller's responsibility)
-pub fn undo_sale_impl(
-    conn: &Connection,
-    sale_id: i64,
-) -> Result<(), String> {
+pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
 
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| e.to_string())?;
 
     // Fetch sale details
     let (product_id, qty, agent_id, customer_id, balance, sale_channel): (
-        i64, i64, Option<i64>, Option<i64>, f64, String,
-    ) = conn.query_row(
-        "SELECT product_id, qty, agent_id, customer_id, COALESCE(balance, 0.0), sale_channel
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        f64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT product_id, qty, agent_id, customer_id, COALESCE(balance, 0.0), sale_channel
          FROM sales WHERE id = ?1",
-        rusqlite::params![sale_id],
-        |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
-        )),
-    ).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        format!("Sale not found: {}", e)
-    })?;
+            rusqlite::params![sale_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .map_err(|e| {
+            let _ = conn.execute("ROLLBACK", []);
+            format!("Sale not found: {}", e)
+        })?;
 
     // Check if already reversed
-    let already_reversed: bool = conn.query_row(
-        "SELECT COALESCE(reversed, 0) FROM sales WHERE id = ?1",
-        rusqlite::params![sale_id],
-        |r| Ok(r.get::<_, i64>(0)? != 0),
-    ).unwrap_or(false);
+    let already_reversed: bool = conn
+        .query_row(
+            "SELECT COALESCE(reversed, 0) FROM sales WHERE id = ?1",
+            rusqlite::params![sale_id],
+            |r| Ok(r.get::<_, i64>(0)? != 0),
+        )
+        .unwrap_or(false);
     if already_reversed {
         let _ = conn.execute("ROLLBACK", []);
         return Err("Sale has already been reversed.".to_string());
     }
 
     // Check if any customer payments are linked to this sale
-    let linked_payments: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM customer_payments WHERE sale_id = ?1",
-        rusqlite::params![sale_id],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let linked_payments: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM customer_payments WHERE sale_id = ?1",
+            rusqlite::params![sale_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     if linked_payments > 0 {
         let _ = conn.execute("ROLLBACK", []);
         return Err(format!(
@@ -296,25 +316,31 @@ pub fn undo_sale_impl(
         // Remove the sale_reported ledger entry (find by matching attributes,
         // pick the most recent one). SQLite DELETE doesn't support LIMIT
         // directly, so we use a subquery to find the row id first.
-        let unit_sale_price: f64 = conn.query_row(
-            "SELECT unit_sale_price FROM sales WHERE id = ?1",
-            rusqlite::params![sale_id],
-            |r| r.get(0),
-        ).unwrap_or(0.0);
+        let unit_sale_price: f64 = conn
+            .query_row(
+                "SELECT unit_sale_price FROM sales WHERE id = ?1",
+                rusqlite::params![sale_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0.0);
         let amount = qty as f64 * unit_sale_price;
-        let sale_date: String = conn.query_row(
-            "SELECT sale_date FROM sales WHERE id = ?1",
-            rusqlite::params![sale_id],
-            |r| r.get(0),
-        ).unwrap_or_default();
-        let ledger_entry_id: Option<i64> = conn.query_row(
-            "SELECT id FROM agent_ledger_entries
+        let sale_date: String = conn
+            .query_row(
+                "SELECT sale_date FROM sales WHERE id = ?1",
+                rusqlite::params![sale_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let ledger_entry_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM agent_ledger_entries
              WHERE agent_id = ?1 AND product_id = ?2 AND entry_type = 'sale_reported'
              AND qty = ?3 AND amount = ?4 AND entry_date = ?5
              ORDER BY id DESC LIMIT 1",
-            rusqlite::params![agent_id, product_id, qty, amount, &sale_date],
-            |r| r.get(0),
-        ).ok();
+                rusqlite::params![agent_id, product_id, qty, amount, &sale_date],
+                |r| r.get(0),
+            )
+            .ok();
         if let Some(entry_id) = ledger_entry_id {
             if let Err(e) = conn.execute(
                 "DELETE FROM agent_ledger_entries WHERE id = ?1",
@@ -336,14 +362,14 @@ pub fn undo_sale_impl(
     }
 
     // Reverse customer balance update (if there was an unpaid balance)
+    // v0.44.0: full waterfall recompute replaces the MAX(0, ...) clamp —
+    // the clamp could silently eat a legitimate advance (negative net) and
+    // drift the cache away from the ledger; the walk is exact.
     if balance > 0.0 {
         if let Some(cid) = customer_id {
-            if let Err(e) = conn.execute(
-                "UPDATE customers SET outstanding_balance = MAX(0, outstanding_balance - ?1), updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![balance, &now, cid],
-            ) {
+            if let Err(e) = customers::recompute_customer_buckets(&conn, cid) {
                 let _ = conn.execute("ROLLBACK", []);
-                return Err(format!("Failed to reverse customer balance: {}", e));
+                return Err(format!("Failed to reverse khata buckets: {}", e));
             }
         }
     }
@@ -391,10 +417,7 @@ pub fn undo_sale_impl(
 /// GUI command — thin wrapper around undo_sale_impl (v0.40.0 extraction;
 /// behavior identical to the pre-v0.40.0 inline version).
 #[tauri::command]
-pub async fn undo_sale(
-    state: State<'_, DbState>,
-    sale_id: i64,
-) -> Result<(), String> {
+pub async fn undo_sale(state: State<'_, DbState>, sale_id: i64) -> Result<(), String> {
     let conn = state.0.lock().await;
     undo_sale_impl(&conn, sale_id)
 }
@@ -424,7 +447,8 @@ pub async fn reactivate_sold_product(
              updated_at = ?2
          WHERE id = ?3",
         rusqlite::params![qty, &now, product_id],
-    ).map_err(|e| format!("Failed to reactivate product: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to reactivate product: {}", e))?;
 
     Ok(())
 }

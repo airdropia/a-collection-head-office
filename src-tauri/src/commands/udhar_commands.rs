@@ -4,14 +4,14 @@
 //! Behavior unchanged — only file structure modified.
 
 use crate::catalog::{self, Product};
-use crate::inventory::{self, InventorySummary, LowStockItem, DeadStockItem, BestSellerItem};
+use crate::commands::{get_setting_val, set_setting_val, DbState};
 use crate::customers::{self, Customer};
-use crate::reports::{self, SalesReport, InventoryReport, CustomerSummaryReport};
+use crate::inventory::{self, BestSellerItem, DeadStockItem, InventorySummary, LowStockItem};
+use crate::reports::{self, CustomerSummaryReport, InventoryReport, SalesReport};
 use crate::utils;
-use crate::commands::{DbState, set_setting_val, get_setting_val};
-use tauri::async_runtime::Mutex;
+use rusqlite::{params, Connection};
 use std::path::Path;
-use rusqlite::{Connection, params};
+use tauri::async_runtime::Mutex;
 use tauri::State;
 
 // ============================================================
@@ -53,50 +53,59 @@ pub async fn get_customer_balance_history(
     let now = chrono::Utc::now().to_rfc3339();
 
     // Fetch sales with balance for this customer
-    let mut stmt = conn.prepare(
-        "SELECT s.id, s.sale_date, p.name, s.qty, s.total_sale_amount, s.balance
+    // v0.44.0: reversed sales excluded — the khata timeline must match the
+    // ledger source of truth (they were showing after undo-sale).
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, s.sale_date, p.name, s.qty, s.total_sale_amount, s.balance
          FROM sales s
          LEFT JOIN products p ON s.product_id = p.id
-         WHERE s.customer_id = ?1
-         ORDER BY s.sale_date ASC"
-    ).map_err(|e| e.to_string())?;
+         WHERE s.customer_id = ?1 AND COALESCE(s.reversed, 0) = 0
+         ORDER BY s.sale_date ASC",
+        )
+        .map_err(|e| e.to_string())?;
 
-    let sales: Vec<(i64, String, String, i64, f64, f64)> = stmt.query_map(
-        [customer_id],
-        |row| Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-        )),
-    ).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
+    let sales: Vec<(i64, String, String, i64, f64, f64)> = stmt
+        .query_map([customer_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Fetch payments for this customer
     // v0.29.0: Now includes entry_type so we can distinguish:
     //   payment, opening_debit, adjustment in the history timeline.
-    let mut stmt2 = conn.prepare(
-        "SELECT id, payment_date, amount, notes, entry_type
+    let mut stmt2 = conn
+        .prepare(
+            "SELECT id, payment_date, amount, notes, entry_type
          FROM customer_payments
          WHERE customer_id = ?1
-         ORDER BY payment_date ASC"
-    ).map_err(|e| e.to_string())?;
+         ORDER BY payment_date ASC",
+        )
+        .map_err(|e| e.to_string())?;
 
-    let payments: Vec<(i64, String, f64, String, String)> = stmt2.query_map(
-        [customer_id],
-        |row| Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "payment".to_string()),
-        )),
-    ).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
+    let payments: Vec<(i64, String, f64, String, String)> = stmt2
+        .query_map([customer_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(4)?
+                    .unwrap_or_else(|| "payment".to_string()),
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Merge + sort by date, compute running balance
     let mut entries: Vec<customers::BalanceHistoryEntry> = Vec::new();
@@ -142,7 +151,8 @@ pub async fn get_customer_balance_history(
 
     for (date, etype, desc, amount_change, id) in combined {
         running_balance += amount_change;
-        if running_balance < 0.0 { running_balance = 0.0; } // safety
+        // v0.44.0: clamp removed — a negative running balance is a legitimate
+        // advance (red bucket) under the dual-bucket model, not an error.
         entries.push(customers::BalanceHistoryEntry {
             id,
             entry_type: etype,
@@ -239,17 +249,20 @@ pub async fn update_customer_ledger_entry(
     let conn = state.0.lock().await;
     let now = chrono::Utc::now().to_rfc3339();
 
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| e.to_string())?;
 
     // Fetch existing entry
-    let (customer_id, entry_type): (i64, String) = conn.query_row(
-        "SELECT customer_id, entry_type FROM customer_payments WHERE id = ?1",
-        rusqlite::params![entry_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        format!("Ledger entry not found: {}", e)
-    })?;
+    let (customer_id, entry_type): (i64, String) = conn
+        .query_row(
+            "SELECT customer_id, entry_type FROM customer_payments WHERE id = ?1",
+            rusqlite::params![entry_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| {
+            let _ = conn.execute("ROLLBACK", []);
+            format!("Ledger entry not found: {}", e)
+        })?;
 
     // Validate based on entry_type
     if entry_type == "opening_debit" && amount <= 0.0 {
@@ -274,7 +287,13 @@ pub async fn update_customer_ledger_entry(
     let res = if entry_date.is_some() {
         conn.execute(
             &sql,
-            rusqlite::params![amount, notes.as_deref().unwrap_or(""), &now, entry_date.as_ref().unwrap(), entry_id],
+            rusqlite::params![
+                amount,
+                notes.as_deref().unwrap_or(""),
+                &now,
+                entry_date.as_ref().unwrap(),
+                entry_id
+            ],
         )
     } else {
         conn.execute(
@@ -287,8 +306,10 @@ pub async fn update_customer_ledger_entry(
         return Err(format!("Failed to update entry: {}", e));
     }
 
-    // Recompute customer's outstanding_balance from all entries
-    recompute_customer_balance(&conn, customer_id)?;
+    // Recompute customer's khata caches (net + both buckets) from all
+    // entries — v0.44.0 dual-bucket recompute replaces the old net-only
+    // sum (which also had a clamp + missed the reversed filter).
+    customers::recompute_customer_buckets(&conn, customer_id)?;
 
     conn.execute("COMMIT", []).map_err(|e| {
         let _ = conn.execute("ROLLBACK", []);
@@ -298,7 +319,7 @@ pub async fn update_customer_ledger_entry(
     Ok(())
 }
 
-/// Delete a manual ledger entry. Recomputes customer's outstanding_balance
+/// Delete a manual ledger entry. Recomputes customer's khata caches
 /// from scratch after deletion. Sale entries cannot be deleted here —
 /// delete the sale instead.
 #[tauri::command]
@@ -308,17 +329,20 @@ pub async fn delete_customer_ledger_entry(
 ) -> Result<(), String> {
     let conn = state.0.lock().await;
 
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| e.to_string())?;
 
     // Fetch entry to delete + validate it's not a sale
-    let (customer_id, entry_type): (i64, String) = conn.query_row(
-        "SELECT customer_id, entry_type FROM customer_payments WHERE id = ?1",
-        rusqlite::params![entry_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        format!("Ledger entry not found: {}", e)
-    })?;
+    let (customer_id, entry_type): (i64, String) = conn
+        .query_row(
+            "SELECT customer_id, entry_type FROM customer_payments WHERE id = ?1",
+            rusqlite::params![entry_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| {
+            let _ = conn.execute("ROLLBACK", []);
+            format!("Ledger entry not found: {}", e)
+        })?;
 
     if let Err(e) = conn.execute(
         "DELETE FROM customer_payments WHERE id = ?1",
@@ -328,8 +352,8 @@ pub async fn delete_customer_ledger_entry(
         return Err(format!("Failed to delete entry: {}", e));
     }
 
-    // Recompute customer's outstanding_balance from remaining entries
-    recompute_customer_balance(&conn, customer_id)?;
+    // Recompute customer's khata caches from remaining entries (v0.44.0)
+    customers::recompute_customer_buckets(&conn, customer_id)?;
 
     conn.execute("COMMIT", []).map_err(|e| {
         let _ = conn.execute("ROLLBACK", []);
@@ -339,48 +363,7 @@ pub async fn delete_customer_ledger_entry(
     Ok(())
 }
 
-/// Helper: recompute a customer's outstanding_balance from scratch.
-///
-/// outstanding_balance = SUM(sales.balance) + SUM(customer_payments amounts)
-/// where customer_payments amounts are:
-///   - 'payment'        → -amount (reduces balance)
-///   - 'opening_debit'  → +amount (increases balance)
-///   - 'adjustment'     → +amount (signed; can be negative)
-///
-/// This is called after update/delete of a ledger entry to ensure the
-/// denormalized outstanding_balance column always matches the source rows.
-fn recompute_customer_balance(conn: &Connection, customer_id: i64) -> Result<(), String> {
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // Sum of all sale balances for this customer
-    let sales_total: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(balance), 0.0) FROM sales WHERE customer_id = ?1",
-        rusqlite::params![customer_id],
-        |r| r.get(0),
-    ).map_err(|e| format!("Failed to sum sales: {}", e))?;
-
-    // Sum of all customer_payments with sign based on entry_type
-    let payments_net: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(
-            CASE WHEN entry_type = 'payment' THEN -amount
-                 WHEN entry_type = 'opening_debit' THEN amount
-                 WHEN entry_type = 'adjustment' THEN amount
-                 ELSE 0.0
-            END
-         ), 0.0)
-         FROM customer_payments WHERE customer_id = ?1",
-        rusqlite::params![customer_id],
-        |r| r.get(0),
-    ).map_err(|e| format!("Failed to sum payments: {}", e))?;
-
-    let new_balance = sales_total + payments_net;
-    // Balance should never go negative (safety clamp)
-    let new_balance = if new_balance < 0.0 { 0.0 } else { new_balance };
-
-    conn.execute(
-        "UPDATE customers SET outstanding_balance = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![new_balance, &now, customer_id],
-    ).map_err(|e| format!("Failed to update balance: {}", e))?;
-
-    Ok(())
-}
+// v0.44.0: the private net-only recompute_customer_balance helper was
+// removed — customers::recompute_customer_buckets (waterfall) replaced it.
+// It had two latent bugs: a MAX(0) clamp that ate legitimate advances and
+// no reversed filter on sales (undo-sale rows polluted the sum).

@@ -1098,7 +1098,8 @@ export default function Catalog() {
                   <option value="">— Walk-in customer (no khata) —</option>
                   {customersList.map(c => (
                     <option key={c.id} value={c.id}>
-                      {c.name}{c.phone ? ` (${c.phone})` : ''}{(c.outstanding_balance ?? 0) > 0 ? ` — Udhar: Rs. ${(c.outstanding_balance ?? 0).toFixed(0)}` : ''}
+                      {/* v0.44.0: both buckets in the dropdown label */}
+                      {c.name}{c.phone ? ` (${c.phone})` : ''}{(c.udhaar_gross ?? 0) > 0.004 ? ` — Lena: Rs. ${(c.udhaar_gross ?? 0).toFixed(0)}` : ''}{(c.advance_gross ?? 0) > 0.004 ? ` — Dena: Rs. ${(c.advance_gross ?? 0).toFixed(0)}` : ''}
                     </option>
                   ))}
                 </select>

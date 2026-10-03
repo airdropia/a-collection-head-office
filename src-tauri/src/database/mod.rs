@@ -1,6 +1,6 @@
 use rusqlite::{Connection, Result};
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 pub fn init_db<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
     if let Some(parent) = db_path.as_ref().parent() {
@@ -20,7 +20,7 @@ pub fn init_db<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
          PRAGMA synchronous = NORMAL;
          PRAGMA cache_size = -4096;
          PRAGMA temp_store = MEMORY;
-         PRAGMA foreign_keys = ON;"
+         PRAGMA foreign_keys = ON;",
     )?;
 
     run_migrations(&mut conn)?;
@@ -59,7 +59,8 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     conn.execute("PRAGMA foreign_keys = ON;", [])?;
 
     // Existing tables (from before)
-    conn.execute("CREATE TABLE IF NOT EXISTS products (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sku TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
@@ -73,39 +74,56 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         images TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS customers (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
         phone TEXT, location TEXT, notes TEXT, created_at TEXT NOT NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS orders (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL,
         total_amount REAL NOT NULL, profit REAL NOT NULL, order_date TEXT NOT NULL,
         FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE
-    );", [])?;
+    );",
+        [],
+    )?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS order_items (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS order_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL,
         product_id INTEGER NOT NULL, quantity INTEGER NOT NULL,
         sale_price REAL NOT NULL, cost_price REAL NOT NULL,
         FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
-    );", [])?;
+    );",
+        [],
+    )?;
 
     // social_posts, ai_logs, ai_knowledge, business_memory, product_drafts,
     // media_assets — AI-era tables. CREATEs REMOVED in v0.37.0 (AI system
     // removed). Existing copies are dropped by the dead_tables list below.
 
-    conn.execute("CREATE TABLE IF NOT EXISTS automations (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS automations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
         schedule_type TEXT NOT NULL, last_run TEXT, active INTEGER NOT NULL DEFAULT 1
-    );", [])?;
+    );",
+        [],
+    )?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS settings (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
     // === NEW TABLES (v0.4.0 — AI Workspace) ===
     // product_drafts / media_assets CREATEs REMOVED in v0.37.0 (AI removal).
@@ -113,23 +131,32 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
 
     // === OLD NEW TABLES (v0.3.0) ===
 
-    conn.execute("CREATE TABLE IF NOT EXISTS locations (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS locations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
         address TEXT, is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS suppliers (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS suppliers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
         contact TEXT, city TEXT, notes TEXT, created_at TEXT NOT NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS product_locations (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS product_locations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL,
         location_id INTEGER NOT NULL, quantity INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
         FOREIGN KEY(location_id) REFERENCES locations(id) ON DELETE CASCADE,
         UNIQUE(product_id, location_id)
-    );", [])?;
+    );",
+        [],
+    )?;
 
     // === MIGRATIONS for existing columns ===
     add_col_if_missing(conn, "products", "product_code", "TEXT DEFAULT ''")?;
@@ -145,14 +172,15 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     // New tables for the profit-first operating system. Additive only —
     // no existing tables dropped, no existing data touched.
 
-// purchase_trips / purchase_trip_items CREATEs REMOVED in v0.38.0
+    // purchase_trips / purchase_trip_items CREATEs REMOVED in v0.38.0
     // (feature removed; pi audit: 2 header-only trips, 0 items ever).
     // Existing tables are dropped by the dead_tables list below.
 
     // --- agents: replaces locations concept (person + place unified) ---
     // One agent = one person at a place. Existing locations data is migrated
     // to agents by sync_locations_to_agents() below.
-    conn.execute("CREATE TABLE IF NOT EXISTS agents (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         agent_code TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
@@ -164,13 +192,16 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
     // --- agent_ledger_entries: unified stock + cash movement log ---
     // This is THE single source of truth for agent stock and money flow.
     // entry_type enum: stock_sent | stock_returned | sale_reported |
     //                  cash_received | balance_adjustment
-    conn.execute("CREATE TABLE IF NOT EXISTS agent_ledger_entries (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_ledger_entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         agent_id INTEGER NOT NULL,
         product_id INTEGER,
@@ -185,14 +216,17 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         updated_at TEXT NOT NULL,
         FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE CASCADE,
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
-// share_logs CREATE REMOVED in v0.38.0 (Share Center removed;
+    // share_logs CREATE REMOVED in v0.38.0 (Share Center removed;
     // pi audit: 0 rows EVER). Existing table dropped by dead_tables list.
 
     // v0.16.0: catalog_publish_history — log of every publish operation.
     // Useful for debugging and showing "last published" status in UI.
-    conn.execute("CREATE TABLE IF NOT EXISTS catalog_publish_history (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS catalog_publish_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         published_at TEXT NOT NULL,
         duration_ms INTEGER NOT NULL,
@@ -204,12 +238,15 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         error_message TEXT,
         warnings_count INTEGER DEFAULT 0,
         errors_count INTEGER DEFAULT 0
-    );", [])?;
+    );",
+        [],
+    )?;
 
     // --- sales: replaces orders table (single sales concept) ---
     // sale_channel enum: head_office | whatsapp | facebook | instagram |
     //                    tiktok | agent
-    conn.execute("CREATE TABLE IF NOT EXISTS sales (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         product_id INTEGER NOT NULL,
         sale_channel TEXT NOT NULL DEFAULT 'head_office',
@@ -226,7 +263,9 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         updated_at TEXT NOT NULL,
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
         FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE SET NULL
-    );", [])?;
+    );",
+        [],
+    )?;
 
     // --- products table: additive column extensions for profit-mode ---
     // Existing columns (sku, name, cost_price, sale_price, etc.) are kept
@@ -242,7 +281,12 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     add_col_if_missing(conn, "products", "qty_with_agents", "INTEGER DEFAULT 0")?;
     add_col_if_missing(conn, "products", "qty_sold", "INTEGER DEFAULT 0")?;
     add_col_if_missing(conn, "products", "qty_reserved", "INTEGER DEFAULT 0")?;
-    add_col_if_missing(conn, "products", "profit_status", "TEXT DEFAULT 'in_head_office'")?;
+    add_col_if_missing(
+        conn,
+        "products",
+        "profit_status",
+        "TEXT DEFAULT 'in_head_office'",
+    )?;
     // qty_in_head_office mirrors the legacy stock_quantity column but with
     // a clearer name in the profit-mode context. Backfilled from
     // stock_quantity on first migration; thereafter maintained by the
@@ -310,7 +354,28 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     // sales.balance = total_sale_amount - amount_paid (carried for audit).
     // customer_payments table = each payment entry (date, amount, notes)
     //   so a customer's payment history is fully traceable + editable.
-    add_col_if_missing(conn, "customers", "outstanding_balance", "REAL NOT NULL DEFAULT 0.0")?;
+    add_col_if_missing(
+        conn,
+        "customers",
+        "outstanding_balance",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
+    // v0.44.0: dual-bucket khata — green/red shown SEPARATELY (owner
+    // directive). Derived caches from the ledger waterfall; net column
+    // above stays = udhaar_gross - advance_gross. Backfilled by the
+    // auto-heal recompute on first launch after upgrade.
+    add_col_if_missing(
+        conn,
+        "customers",
+        "udhaar_gross",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
+    add_col_if_missing(
+        conn,
+        "customers",
+        "advance_gross",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
     add_col_if_missing(conn, "sales", "amount_paid", "REAL NOT NULL DEFAULT 0.0")?;
     add_col_if_missing(conn, "sales", "balance", "REAL NOT NULL DEFAULT 0.0")?;
     add_col_if_missing(conn, "sales", "customer_id", "INTEGER")?;
@@ -349,7 +414,12 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     //   - 'adjustment'     (new) arbitrary correction (+/-). Positive amount
     //                       increases customer's outstanding_balance (they owe
     //                       more); negative decreases (discount/write-off).
-    add_col_if_missing(conn, "customer_payments", "entry_type", "TEXT NOT NULL DEFAULT 'payment'")?;
+    add_col_if_missing(
+        conn,
+        "customer_payments",
+        "entry_type",
+        "TEXT NOT NULL DEFAULT 'payment'",
+    )?;
 
     // v0.14.4: Add performance indexes.
     // agent_ledger_entries is queried heavily by get_agent_summary,
@@ -440,13 +510,21 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
 }
 
 fn add_col_if_missing(conn: &Connection, table: &str, col: &str, col_def: &str) -> Result<()> {
-    let exists: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name='{}'", table, col),
-        [],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let exists: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name='{}'",
+                table, col
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     if exists == 0 {
-        conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, col, col_def), [])?;
+        conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, col, col_def),
+            [],
+        )?;
     }
     Ok(())
 }
@@ -486,25 +564,35 @@ const DEFAULT_PROFILE: &str = r#"{
 
 fn ensure_business_profile(conn: &Connection) -> Result<()> {
     let val: Result<String, _> = conn.query_row(
-        "SELECT value FROM settings WHERE key = 'business_profile'", [], |row| row.get(0),
+        "SELECT value FROM settings WHERE key = 'business_profile'",
+        [],
+        |row| row.get(0),
     );
     match val {
         Ok(existing) => {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&existing) {
                 if json.get("currency").is_none() || json.get("facebook_page").is_none() {
-                    conn.execute("UPDATE settings SET value = ?1 WHERE key = 'business_profile'", [DEFAULT_PROFILE])?;
+                    conn.execute(
+                        "UPDATE settings SET value = ?1 WHERE key = 'business_profile'",
+                        [DEFAULT_PROFILE],
+                    )?;
                 }
             }
         }
         Err(_) => {
-            conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('business_profile', ?1)", [DEFAULT_PROFILE])?;
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES ('business_profile', ?1)",
+                [DEFAULT_PROFILE],
+            )?;
         }
     }
     Ok(())
 }
 
 fn seed_locations(conn: &Connection) -> Result<()> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM locations", [], |r| r.get(0)).unwrap_or(0);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM locations", [], |r| r.get(0))
+        .unwrap_or(0);
     if count == 0 {
         let now = chrono::Utc::now().to_rfc3339();
         // Issue #6 fix: derive seed locations from DEFAULT_PROFILE.sales_areas
@@ -530,9 +618,15 @@ fn seed_locations(conn: &Connection) -> Result<()> {
             }
         }
         // Fallback if profile parsing failed for any reason
-        let locs = [("Head Office", "Main Office"), ("Shakargarh Shop", "Shakargarh City")];
+        let locs = [
+            ("Head Office", "Main Office"),
+            ("Shakargarh Shop", "Shakargarh City"),
+        ];
         for (name, addr) in &locs {
-            conn.execute("INSERT INTO locations (name, address, created_at) VALUES (?1, ?2, ?3)", rusqlite::params![name, addr, &now])?;
+            conn.execute(
+                "INSERT INTO locations (name, address, created_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![name, addr, &now],
+            )?;
         }
     }
     Ok(())
@@ -549,11 +643,12 @@ fn cleanup_duplicate_agents(conn: &Connection) -> Result<()> {
         "SELECT LOWER(name) AS lname, COUNT(*) as cnt
          FROM agents
          GROUP BY LOWER(name)
-         HAVING cnt > 1"
+         HAVING cnt > 1",
     )?;
-    let dupes: Vec<String> = stmt.query_map([], |row| {
-        row.get::<_, String>(0)
-    })?.filter_map(|r| r.ok()).collect();
+    let dupes: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
 
     for lname in dupes {
         // Delete all agents with this name EXCEPT the one with the lowest id
@@ -573,8 +668,12 @@ fn seed_initial_data(conn: &mut Connection) -> Result<()> {
     let settings_count: i64 = conn.query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))?;
     if settings_count == 0 {
         let default_settings = [
-            ("theme", "dark"), ("ai_provider", "gemini"), ("ai_api_key", ""),
-            ("ai_model", "gemini-2.0-flash"), ("backup_path", ""), ("backup_interval_days", "7"),
+            ("theme", "dark"),
+            ("ai_provider", "gemini"),
+            ("ai_api_key", ""),
+            ("ai_model", "gemini-2.0-flash"),
+            ("backup_path", ""),
+            ("backup_interval_days", "7"),
             ("business_profile", DEFAULT_PROFILE),
         ];
         for (k, v) in default_settings.iter() {
@@ -584,10 +683,17 @@ fn seed_initial_data(conn: &mut Connection) -> Result<()> {
 
     let aut_count: i64 = conn.query_row("SELECT COUNT(*) FROM automations", [], |r| r.get(0))?;
     if aut_count == 0 {
-        let automations = [("Database Backup", "daily"), ("Weekly Performance Report", "weekly"),
-            ("Low Stock Reminder", "daily"), ("Dead Stock Audit", "monthly")];
+        let automations = [
+            ("Database Backup", "daily"),
+            ("Weekly Performance Report", "weekly"),
+            ("Low Stock Reminder", "daily"),
+            ("Dead Stock Audit", "monthly"),
+        ];
         for (name, sched) in automations.iter() {
-            conn.execute("INSERT INTO automations (name, schedule_type, active) VALUES (?1, ?2, 1);", [name, sched])?;
+            conn.execute(
+                "INSERT INTO automations (name, schedule_type, active) VALUES (?1, ?2, 1);",
+                [name, sched],
+            )?;
         }
     }
 
@@ -607,8 +713,18 @@ fn seed_initial_data(conn: &mut Connection) -> Result<()> {
     if cust_count == 0 {
         let now = chrono::Utc::now().to_rfc3339();
         let customers = [
-            ("Ahmad Khan", "+923001234567", "Narowal, Pakistan", "Regular customer, prefers medium sizes."),
-            ("Sara Ahmed", "+923219876543", "Shakargarh, Pakistan", "Interested in lawn collections."),
+            (
+                "Ahmad Khan",
+                "+923001234567",
+                "Narowal, Pakistan",
+                "Regular customer, prefers medium sizes.",
+            ),
+            (
+                "Sara Ahmed",
+                "+923219876543",
+                "Shakargarh, Pakistan",
+                "Interested in lawn collections.",
+            ),
         ];
         for (name, phone, loc, notes) in customers.iter() {
             conn.execute("INSERT INTO customers (name, phone, location, notes, created_at) VALUES (?1, ?2, ?3, ?4, ?5);", (name, phone, loc, notes, &now))?;

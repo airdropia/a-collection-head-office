@@ -47,22 +47,34 @@ body {
   color: #f3f4f6;
   overflow: hidden;
   /* v0.12.6: Increase base font size for better readability,
-     especially for users with weaker eyesight (49+ age). */
-  font-size: 15px;
+     especially for users with weaker eyesight (49+ age).
+     v0.44.0: owner asked for a BIGGER bump (weak eyesight) —
+     15px -> 17px body + root 18px so every rem-based Tailwind size
+     scales ~12.5% too, and base weight 400 -> 500. */
+  font-size: 17px;
+  font-weight: 500;
   line-height: 1.6;
+}
+
+/* v0.44.0: root font-size bump — Tailwind's text-sm/base/lg etc. are
+   rem-based, so raising the root scales the whole UI proportionally
+   (16px -> 18px = +12.5%). Spacing scales with it, keeping layouts
+   coherent instead of just inflating glyphs. */
+html {
+  font-size: 18px;
 }
 
 /* v0.12.6: Override Tailwind's tiny text classes to have a minimum size.
    text-[10px] and text-[11px] are used in many places for badges/labels.
-   We bump them up to 12px minimum so they're legible. */
+   v0.44.0: floors raised again for weak eyesight — nothing below ~12.5px. */
 .text-\[10px\] {
-  font-size: 12px !important;
+  font-size: 13.5px !important;
 }
 .text-\[11px\] {
-  font-size: 12.5px !important;
+  font-size: 14px !important;
 }
 .text-\[9px\] {
-  font-size: 11px !important;
+  font-size: 12.5px !important;
 }
 
 /* Glassmorphism effects */

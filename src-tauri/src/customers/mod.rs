@@ -1,5 +1,5 @@
-use serde::{Serialize, Deserialize};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Customer {
@@ -12,10 +12,15 @@ pub struct Customer {
     pub created_at: Option<String>,
     #[serde(default)]
     pub outstanding_balance: f64,
+    // v0.44.0: dual-bucket khata — green (lena hai) and red (dena hai)
+    // shown SEPARATELY, per owner directive. Net = udhaar_gross - advance_gross.
+    #[serde(default)]
+    pub udhaar_gross: f64,
+    #[serde(default)]
+    pub advance_gross: f64,
     #[serde(default)]
     pub segment: Option<String>,
 }
-
 
 /// v0.26.0: A single entry in a customer's balance history.
 /// Either a sale (increases balance) or a payment (decreases balance).
@@ -23,19 +28,19 @@ pub struct Customer {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BalanceHistoryEntry {
     pub id: i64,
-    pub entry_type: String,   // "sale" | "payment"
+    pub entry_type: String, // "sale" | "payment"
     pub date: String,
-    pub description: String,  // product name + qty, or payment notes
-    pub amount: f64,          // positive for sale, negative for payment
-    pub balance_after: f64,   // running balance after this entry
+    pub description: String, // product name + qty, or payment notes
+    pub amount: f64,         // positive for sale, negative for payment
+    pub balance_after: f64,  // running balance after this entry
 }
 
 pub fn get_all_customers(conn: &Connection) -> Result<Vec<Customer>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, phone, location, notes, created_at, COALESCE(outstanding_balance, 0.0), COALESCE(segment, 'general')
+        "SELECT id, name, phone, location, notes, created_at, COALESCE(outstanding_balance, 0.0), COALESCE(udhaar_gross, 0.0), COALESCE(advance_gross, 0.0), COALESCE(segment, 'general')
          FROM customers ORDER BY name ASC"
     )?;
-    
+
     let customer_iter = stmt.query_map([], |row| {
         Ok(Customer {
             id: Some(row.get(0)?),
@@ -45,7 +50,9 @@ pub fn get_all_customers(conn: &Connection) -> Result<Vec<Customer>, rusqlite::E
             notes: row.get(4)?,
             created_at: Some(row.get(5)?),
             outstanding_balance: row.get(6)?,
-            segment: row.get(7)?,
+            udhaar_gross: row.get(7)?,
+            advance_gross: row.get(8)?,
+            segment: row.get(9)?,
         })
     })?;
 
@@ -79,7 +86,7 @@ pub fn update_customer(conn: &Connection, customer: &Customer) -> Result<(), rus
             &customer.phone,
             &customer.location,
             &customer.notes,
-            customer.id
+            customer.id,
         ),
     )?;
     Ok(())
@@ -89,8 +96,6 @@ pub fn delete_customer(conn: &Connection, id: i64) -> Result<(), rusqlite::Error
     conn.execute("DELETE FROM customers WHERE id = ?1", params![id])?;
     Ok(())
 }
-
-
 
 // ============================================================
 // v0.35.0 — Phase B: canonical balance recompute (auto-heal)
@@ -117,6 +122,16 @@ pub struct BalanceDrift {
     pub stored: f64,
     pub computed: f64,
     pub fixed: bool,
+    // v0.44.0: dual-bucket drift detail (net may match while buckets are
+    // stale — e.g. the first launch after the upgrade backfills 0.0 caches)
+    #[serde(default)]
+    pub udhaar_stored: f64,
+    #[serde(default)]
+    pub udhaar_computed: f64,
+    #[serde(default)]
+    pub advance_stored: f64,
+    #[serde(default)]
+    pub advance_computed: f64,
 }
 
 pub const CANONICAL_OUTSTANDING_SQL: &str = "
@@ -129,38 +144,201 @@ pub const CANONICAL_OUTSTANDING_SQL: &str = "
   + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
               WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)";
 
-/// Read-only: report every customer whose stored cache differs from the
-/// computed canonical balance (|drift| > 0.004).
+// ============================================================
+// v0.44.0 — DUAL-BUCKET KHATA (udhaar_gross / advance_gross)
+// ============================================================
+//
+// Owner directive (2026-10-02): net-only display was confusing — green
+// (lena hai) and red (dena hai) must BOTH be visible, per customer and
+// overall. Buckets are derived from the SAME ledger source of truth as
+// CANONICAL_OUTSTANDING_SQL via a waterfall walk:
+//
+//   udhaar_gross  (GREEN) = soot/cash we gave, still un-recovered
+//   advance_gross (RED)   = advances/overpayments we hold, still un-settled
+//   outstanding_balance    = udhaar_gross - advance_gross (net, semantics
+//                           unchanged — equals the canonical aggregate)
+//
+// Waterfall rules (owner-confirmed):
+//   * maal diya (sale balance B > 0): advance PEHLE khata hai
+//     (red -= min(B, red)); bachi raqam udhaar banti hai (green += rest)
+//   * paisa aaya (payment / negative adjustment P): udhaar PEHLE settle
+//     (green -= min(P, green)); excess advance banta hai (red += rest)
+//   * opening_debit / positive adjustment: green += amount
+//   * overpaid sale (balance < 0): cash-in jaisa treat hota hai
+//
+// Math property: creation and cash-in events COMMUTE in this waterfall
+// (verified algebraically), so the final buckets are order-independent —
+// the chronological sort is for determinism only.
+
+#[derive(Debug, Clone, Copy)]
+pub struct CustomerBuckets {
+    pub udhaar_gross: f64,
+    pub advance_gross: f64,
+}
+
+fn bucket_cash_in(p: f64, green: &mut f64, red: &mut f64) {
+    let applied = p.min(*green);
+    *green -= applied;
+    *red += p - applied;
+}
+
+/// Waterfall walk over one customer's ledger (sales + customer_payments).
+/// Read-only. Net invariant: green - red == CANONICAL_OUTSTANDING_SQL
+/// (identical event set + signs), so buckets can never disagree with the
+/// canonical net beyond float noise.
+pub fn compute_customer_buckets(
+    conn: &Connection,
+    customer_id: i64,
+) -> Result<CustomerBuckets, String> {
+    // events: (date, id, table_rank, kind, amount)
+    // kind 0 = plain udhaar-creation (opening_debit / +adjustment)
+    // kind 1 = cash-in (payment / -adjustment / overpaid sale)
+    // kind 2 = sale-creation (consumes advance first, remainder udhaar)
+    let mut events: Vec<(String, i64, i8, i8, f64)> = Vec::new();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, s.sale_date, s.balance FROM sales s
+         WHERE s.customer_id = ?1 AND COALESCE(s.reversed, 0) = 0",
+        )
+        .map_err(|e| e.to_string())?;
+    let sale_rows = stmt
+        .query_map(params![customer_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for r in sale_rows {
+        let (id, date, balance) = r.map_err(|e| e.to_string())?;
+        if balance > 0.0 {
+            events.push((date, id, 0, 2, balance));
+        } else if balance < 0.0 {
+            events.push((date, id, 0, 1, -balance));
+        }
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.id, p.payment_date, COALESCE(p.entry_type, 'payment'), p.amount
+         FROM customer_payments p WHERE p.customer_id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let pay_rows = stmt
+        .query_map(params![customer_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for r in pay_rows {
+        let (id, date, etype, amount) = r.map_err(|e| e.to_string())?;
+        match etype.as_str() {
+            "opening_debit" => events.push((date, id, 1, 0, amount)),
+            "adjustment" => {
+                if amount >= 0.0 {
+                    events.push((date, id, 1, 0, amount));
+                } else {
+                    events.push((date, id, 1, 1, -amount));
+                }
+            }
+            _ => events.push((date, id, 1, 1, amount)), // payment / legacy NULL
+        }
+    }
+
+    events.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+
+    let mut green = 0.0_f64;
+    let mut red = 0.0_f64;
+    for (_, _, _, kind, amount) in events {
+        match kind {
+            0 => green += amount,
+            1 => bucket_cash_in(amount, &mut green, &mut red),
+            _ => {
+                let consumed = amount.min(red);
+                red -= consumed;
+                green += amount - consumed;
+            }
+        }
+    }
+    Ok(CustomerBuckets {
+        udhaar_gross: green,
+        advance_gross: red,
+    })
+}
+
+/// Rewrite the cached khata columns (net + both buckets) for one customer
+/// from the ledger waterfall. MUST be called inside the same transaction
+/// as the ledger mutation. Ledger tables are never modified.
+pub fn recompute_customer_buckets(conn: &Connection, customer_id: i64) -> Result<(), String> {
+    let b = compute_customer_buckets(conn, customer_id)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE customers SET outstanding_balance = ?1, udhaar_gross = ?2, advance_gross = ?3, updated_at = ?4 WHERE id = ?5",
+        params![b.udhaar_gross - b.advance_gross, b.udhaar_gross, b.advance_gross, &now, customer_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read-only: report every customer whose stored khata caches (net or
+/// either bucket) differ from the computed ledger waterfall (|drift| > 0.004).
 pub fn get_customer_balance_drift(conn: &Connection) -> Result<Vec<BalanceDrift>, rusqlite::Error> {
     let mut stmt = conn.prepare(&format!(
         "SELECT c.id, c.name, COALESCE(c.outstanding_balance, 0.0),
+                COALESCE(c.udhaar_gross, 0.0), COALESCE(c.advance_gross, 0.0),
                 ({}) AS computed
          FROM customers c",
         CANONICAL_OUTSTANDING_SQL
     ))?;
     let rows = stmt.query_map([], |row| {
-        let stored: f64 = row.get(2)?;
-        let computed: f64 = row.get(3)?;
-        Ok(BalanceDrift {
-            customer_id: row.get(0)?,
-            name: row.get(1)?,
-            stored,
-            computed,
-            fixed: false,
-        })
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f64>(2)?,
+            row.get::<_, f64>(3)?,
+            row.get::<_, f64>(4)?,
+            row.get::<_, f64>(5)?,
+        ))
     })?;
-    let mut drifts = Vec::new();
+    let mut candidates: Vec<(i64, String, f64, f64, f64, f64)> = Vec::new();
     for r in rows {
-        let d = r?;
-        if (d.stored - d.computed).abs() > 0.004 {
-            drifts.push(d);
+        candidates.push(r?);
+    }
+    drop(stmt);
+
+    let mut drifts = Vec::new();
+    for (cid, name, stored_net, stored_u, stored_a, computed_net) in candidates {
+        let buckets = compute_customer_buckets(conn, cid).unwrap_or(CustomerBuckets {
+            udhaar_gross: stored_u,
+            advance_gross: stored_a,
+        });
+        let net_diff = (stored_net - computed_net).abs() > 0.004;
+        let u_diff = (stored_u - buckets.udhaar_gross).abs() > 0.004;
+        let a_diff = (stored_a - buckets.advance_gross).abs() > 0.004;
+        if net_diff || u_diff || a_diff {
+            drifts.push(BalanceDrift {
+                customer_id: cid,
+                name,
+                stored: stored_net,
+                computed: computed_net,
+                fixed: false,
+                udhaar_stored: stored_u,
+                udhaar_computed: buckets.udhaar_gross,
+                advance_stored: stored_a,
+                advance_computed: buckets.advance_gross,
+            });
         }
     }
     Ok(drifts)
 }
 
-/// Write: recompute every customer's outstanding_balance cache from the
-/// canonical ledger aggregate and rewrite drifted rows. Returns the list of
+/// Write: recompute every customer's khata caches (net + both buckets) from
+/// the canonical ledger and rewrite drifted rows. Returns the list of
 /// rows that were out of sync (with `fixed = true` on the ones rewritten).
 /// Ledger tables are NEVER modified by this function.
 pub fn recompute_all_customer_balances(
@@ -173,8 +351,8 @@ pub fn recompute_all_customer_balances(
     let now = chrono::Utc::now().to_rfc3339();
     for d in &drifts {
         conn.execute(
-            "UPDATE customers SET outstanding_balance = ?1, updated_at = ?2 WHERE id = ?3",
-            params![d.computed, &now, d.customer_id],
+            "UPDATE customers SET outstanding_balance = ?1, udhaar_gross = ?2, advance_gross = ?3, updated_at = ?4 WHERE id = ?5",
+            params![d.computed, d.udhaar_computed, d.advance_computed, &now, d.customer_id],
         )?;
     }
     Ok(drifts
@@ -206,16 +384,19 @@ pub fn record_payment_impl(
     }
     let now = chrono::Utc::now().to_rfc3339();
 
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| e.to_string())?;
 
-    let current_balance: f64 = conn.query_row(
-        "SELECT COALESCE(outstanding_balance, 0.0) FROM customers WHERE id = ?1",
-        params![customer_id],
-        |r| r.get(0),
-    ).map_err(|e| {
-        let _ = conn.execute("ROLLBACK", []);
-        format!("Customer not found: {}", e)
-    })?;
+    let current_balance: f64 = conn
+        .query_row(
+            "SELECT COALESCE(outstanding_balance, 0.0) FROM customers WHERE id = ?1",
+            params![customer_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| {
+            let _ = conn.execute("ROLLBACK", []);
+            format!("Customer not found: {}", e)
+        })?;
 
     if amount > current_balance {
         let _ = conn.execute("ROLLBACK", []);
@@ -242,12 +423,11 @@ pub fn record_payment_impl(
         return Err(format!("Failed to insert payment: {}", e));
     }
 
-    if let Err(e) = conn.execute(
-        "UPDATE customers SET outstanding_balance = outstanding_balance - ?1, updated_at = ?2 WHERE id = ?3",
-        params![amount, &now, customer_id],
-    ) {
+    // v0.44.0: net + both buckets rewritten from the ledger waterfall
+    // (was: incremental outstanding_balance -= amount)
+    if let Err(e) = recompute_customer_buckets(conn, customer_id) {
         let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to update balance: {}", e));
+        return Err(format!("Failed to update khata buckets: {}", e));
     }
 
     conn.execute("COMMIT", []).map_err(|e| {
@@ -286,7 +466,8 @@ pub fn add_manual_entry_impl(
     let now = chrono::Utc::now().to_rfc3339();
     let entry_date = date.unwrap_or(&now);
 
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| e.to_string())?;
 
     if conn
         .query_row(
@@ -319,12 +500,11 @@ pub fn add_manual_entry_impl(
     }
     let entry_id = conn.last_insert_rowid();
 
-    if let Err(e) = conn.execute(
-        "UPDATE customers SET outstanding_balance = outstanding_balance + ?1, updated_at = ?2 WHERE id = ?3",
-        params![amount, &now, customer_id],
-    ) {
+    // v0.44.0: net + both buckets rewritten from the ledger waterfall
+    // (was: incremental outstanding_balance += amount)
+    if let Err(e) = recompute_customer_buckets(conn, customer_id) {
         let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to update balance: {}", e));
+        return Err(format!("Failed to update khata buckets: {}", e));
     }
 
     conn.execute("COMMIT", []).map_err(|e| {

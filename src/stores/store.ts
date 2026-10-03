@@ -45,6 +45,9 @@ export interface Customer {
   created_at?: string;
   // v0.26.0: Udhar/Credit tracking
   outstanding_balance?: number;
+  // v0.44.0: dual-bucket khata — green/red shown separately (owner directive)
+  udhaar_gross?: number;
+  advance_gross?: number;
   segment?: string;
 }
 

@@ -1,6 +1,6 @@
 {
   "productName": "A Collection Head Office",
-  "version": "0.43.0",
+  "version": "0.44.0",
   "identifier": "com.airdropia.collectionheadoffice",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,8 +12,8 @@
     "windows": [
       {
         "title": "A Collection Head Office",
-        "width": 1280,
-        "height": 800,
+        "width": 1400,
+        "height": 900,
         "resizable": true,
         "fullscreen": false
       }

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useAppStore } from '../stores/store'
 import {
   Package, Layers, Users,
-  ShoppingCart, RefreshCw, BookOpen, IndianRupee
+  ShoppingCart, RefreshCw, BookOpen, IndianRupee, Wallet
 } from 'lucide-react'
 import { fmtMoney } from '../utils/format'
 
@@ -78,42 +78,54 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Customer (khata) net outstanding — standalone card.
-          Red/green direction: positive = lene hain, negative = dene hain. */}
+      {/* Customer (khata) — v0.44.0: BOTH buckets shown separately (owner
+          directive): GREEN lena hai = Σ udhaar_gross, RED dena hai = Σ advance_gross.
+          Net stays as a small reference line. Click-through to Customers. */}
       <div className="glass-card p-5">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold text-white flex items-center">
             <Users size={14} className="mr-2 text-amber-400" />
-            Customer Khata (net)
+            Customer Khata (dono hisaab)
           </h2>
           <button onClick={() => setCurrentTab('customers')}
             className="text-[10px] text-violet-400 hover:text-violet-300">View All →</button>
         </div>
         {(() => {
-          const custNet = customers.reduce((s, c) => s + (c.outstanding_balance || 0), 0)
-          if (custNet === 0) return (
-            <p className="text-xs text-gray-500 py-6 text-center">All customer khatas settled — net zero.</p>
-          )
+          const totalUdhaar = customers.reduce((s, c) => s + (c.udhaar_gross || 0), 0)
+          const totalAdvance = customers.reduce((s, c) => s + (c.advance_gross || 0), 0)
+          const custNet = totalUdhaar - totalAdvance
           return (
-            <button
-              onClick={() => setCurrentTab('customers')}
-              className={`w-full p-3 rounded-lg border flex items-center justify-between transition-colors ${
-                custNet > 0 ? 'bg-emerald-900/10 border-emerald-700/30 hover:border-emerald-600/50'
-                            : 'bg-red-900/10 border-red-700/30 hover:border-red-600/50'
-              }`}>
-              <div className="flex items-center gap-2">
-                <Users size={14} className={custNet > 0 ? 'text-emerald-400' : 'text-red-400'} />
-                <div className="text-left">
-                  <div className={`text-xs font-semibold ${custNet > 0 ? 'text-emerald-300' : 'text-red-300'}`}>
-                    {custNet > 0 ? 'HO ko lena hai' : 'HO ko dena hai'}
+            <div className="space-y-2">
+              <button
+                onClick={() => setCurrentTab('customers')}
+                className="w-full p-3 rounded-lg border bg-emerald-900/10 border-emerald-700/30 hover:border-emerald-600/50 flex items-center justify-between transition-colors">
+                <div className="flex items-center gap-2">
+                  <Wallet size={16} className="text-emerald-400" />
+                  <div className="text-left">
+                    <div className="text-xs font-semibold text-emerald-300">HO ko LENA hai (Udhar)</div>
+                    <div className="text-[10px] text-gray-500">soot/cash diya, wasool baqi</div>
                   </div>
-                  <div className="text-[10px] text-gray-500">net across {customers.length} customers</div>
                 </div>
-              </div>
-              <div className={`text-sm font-bold ${custNet > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {fmtMoney(Math.abs(custNet))}
-              </div>
-            </button>
+                <div className="text-2xl font-extrabold text-emerald-400 tracking-tight">{fmtMoney(totalUdhaar)}</div>
+              </button>
+              <button
+                onClick={() => setCurrentTab('customers')}
+                className="w-full p-3 rounded-lg border bg-red-900/10 border-red-700/30 hover:border-red-600/50 flex items-center justify-between transition-colors">
+                <div className="flex items-center gap-2">
+                  <Wallet size={16} className="text-red-400" />
+                  <div className="text-left">
+                    <div className="text-xs font-semibold text-red-300">HO ko DENA hai (Advance)</div>
+                    <div className="text-[10px] text-gray-500">advance / overpay held</div>
+                  </div>
+                </div>
+                <div className="text-2xl font-extrabold text-red-400 tracking-tight">{fmtMoney(totalAdvance)}</div>
+              </button>
+              <p className="text-center text-xs text-gray-500">
+                Net: <span className={`font-bold ${custNet > 0 ? 'text-emerald-300' : custNet < 0 ? 'text-red-300' : 'text-gray-400'}`}>
+                  {custNet > 0 ? `lena hai ${fmtMoney(custNet)}` : custNet < 0 ? `dena hai ${fmtMoney(-custNet)}` : 'settled'}
+                </span>
+              </p>
+            </div>
           )
         })()}
       </div>
