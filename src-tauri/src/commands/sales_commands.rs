@@ -80,12 +80,13 @@ pub fn record_sale_impl(
         };
     }
 
-    // Direct HO sale — validate HO has enough stock
-    // (v0.36.0: agent branch removed — all sales are HO sales now)
-    let ho_qty: i64 = match conn.query_row(
-        "SELECT COALESCE(qty_in_head_office, stock_quantity, 0) FROM products WHERE id = ?1",
+    // Direct HO sale — validate HO has enough stock + capture sale-time
+    // item snapshot (v0.45.0 catalog-accounting decoupling: the sale row
+    // freezes name/sku so khata/history survive product renames/deletes).
+    let (ho_qty, item_name, item_sku): (i64, Option<String>, Option<String>) = match conn.query_row(
+        "SELECT COALESCE(qty_in_head_office, stock_quantity, 0), name, sku FROM products WHERE id = ?1",
         rusqlite::params![product_id],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -112,10 +113,12 @@ pub fn record_sale_impl(
     let paid = amount_paid.unwrap_or(total).min(total);
     let balance = (total - paid).max(0.0);
     try_or_rollback!(conn.execute(
-        "INSERT INTO sales (product_id, sale_channel, sale_type, agent_id, qty, unit_sale_price, total_sale_amount, amount_paid, balance, customer_id, customer_name, customer_phone, notes, sale_date, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO sales (product_id, item_name, item_sku, sale_channel, sale_type, agent_id, qty, unit_sale_price, total_sale_amount, amount_paid, balance, customer_id, customer_name, customer_phone, notes, sale_date, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             product_id,
+            item_name,
+            item_sku,
             sale_channel,
             "direct_sale",
             Option::<i64>::None,
@@ -490,7 +493,7 @@ pub async fn get_recent_sales(
     let n = limit.unwrap_or(10).clamp(1, 100);
     let mut stmt = conn
         .prepare(
-            "SELECT s.id, s.sale_date, p.name, s.qty, s.total_sale_amount,
+            "SELECT s.id, s.sale_date, COALESCE(s.item_name, p.name) AS item, s.qty, s.total_sale_amount,
                     s.sale_channel, s.customer_name, COALESCE(s.reversed, 0)
              FROM sales s LEFT JOIN products p ON p.id = s.product_id
              ORDER BY s.sale_date DESC, s.id DESC LIMIT ?1",

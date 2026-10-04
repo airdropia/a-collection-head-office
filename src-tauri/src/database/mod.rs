@@ -245,10 +245,22 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     // --- sales: replaces orders table (single sales concept) ---
     // sale_channel enum: head_office | whatsapp | facebook | instagram |
     //                    tiktok | agent
+    // v0.45.0: CATALOG-ACCOUNTING DECOUPLING (owner directive):
+    //   - product_id is now NULLABLE with ON DELETE SET NULL — a product
+    //     can be deleted even if it has sales history (wrong-catalog-entry
+    //     cleanup); the sale rows survive with their snapshots.
+    //   - item_name / item_sku are sale-time snapshots (frozen truth of
+    //     WHAT was sold, even if the product is later renamed or deleted).
+    //     Existing DBs get the same shape via the rebuild migration below;
+    //     fresh installs start here. Both paths converge to this order:
+    //     base CREATE + the 4 add_col_if_missing columns (amount_paid,
+    //     balance, customer_id, reversed) appended at the end.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id INTEGER NOT NULL,
+        product_id INTEGER,
+        item_name TEXT,
+        item_sku TEXT,
         sale_channel TEXT NOT NULL DEFAULT 'head_office',
         sale_type TEXT,
         agent_id INTEGER,
@@ -261,7 +273,7 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
         sale_date TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
+        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL,
         FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE SET NULL
     );",
         [],
@@ -383,6 +395,100 @@ fn run_migrations_impl(conn: &mut Connection) -> Result<()> {
     // 0 = active sale (default)
     // 1 = reversed (sale row kept for audit, but excluded from reports/summaries)
     add_col_if_missing(conn, "sales", "reversed", "INTEGER NOT NULL DEFAULT 0")?;
+
+    // ============================================================
+    // v0.45.0 — sales TABLE REBUILD (catalog-accounting decoupling)
+    // ============================================================
+    // Existing (pre-0.45) DBs carry product_id INTEGER NOT NULL + FK ON
+    // DELETE RESTRICT — a product with sales could never be deleted, and
+    // sale rows stored no item snapshot. SQLite cannot ALTER an FK, so the
+    // table is rebuilt in-transaction (standard 12-step recipe):
+    //   sales_new (new shape incl. item_name/item_sku)
+    //   INSERT INTO sales_new SELECT ... LEFT JOIN products  <- backfill
+    //   DROP sales; RENAME sales_new -> sales
+    // Guarded by the FK action, so it is a one-time migration: fresh
+    // installs and already-rebuilt DBs have on_delete = 'SET NULL' and
+    // skip. Id continuity is preserved via AUTOINCREMENT (explicit-id
+    // inserts push sqlite_sequence to max(id)). No indexes/views/triggers
+    // existed on sales (verified v0.45.0). PRAGMA foreign_keys cannot be
+    // toggled inside a transaction — OFF before BEGIN, ON after COMMIT.
+    {
+        let needs_rebuild: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('sales')
+             WHERE \"table\" = 'products' AND on_delete = 'RESTRICT'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        if needs_rebuild > 0 {
+            conn.execute("PRAGMA foreign_keys = OFF;", [])?;
+            conn.execute("BEGIN IMMEDIATE", [])?;
+            if let Err(e) = (|| -> Result<(), rusqlite::Error> {
+                conn.execute(
+                    "CREATE TABLE sales_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER,
+                    item_name TEXT,
+                    item_sku TEXT,
+                    sale_channel TEXT NOT NULL DEFAULT 'head_office',
+                    sale_type TEXT,
+                    agent_id INTEGER,
+                    qty INTEGER NOT NULL DEFAULT 1,
+                    unit_sale_price REAL NOT NULL DEFAULT 0.0,
+                    total_sale_amount REAL NOT NULL DEFAULT 0.0,
+                    customer_name TEXT,
+                    customer_phone TEXT,
+                    notes TEXT,
+                    sale_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    amount_paid REAL NOT NULL DEFAULT 0.0,
+                    balance REAL NOT NULL DEFAULT 0.0,
+                    customer_id INTEGER,
+                    reversed INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL,
+                    FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE SET NULL
+                );",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO sales_new
+                        (id, product_id, item_name, item_sku, sale_channel, sale_type,
+                         agent_id, qty, unit_sale_price, total_sale_amount,
+                         customer_name, customer_phone, notes, sale_date,
+                         created_at, updated_at, amount_paid, balance,
+                         customer_id, reversed)
+                     SELECT
+                         s.id, s.product_id, p.name, p.sku, s.sale_channel, s.sale_type,
+                         s.agent_id, s.qty, s.unit_sale_price, s.total_sale_amount,
+                         s.customer_name, s.customer_phone, s.notes, s.sale_date,
+                         s.created_at, s.updated_at, COALESCE(s.amount_paid, 0.0),
+                         COALESCE(s.balance, 0.0), s.customer_id, COALESCE(s.reversed, 0)
+                     FROM sales s LEFT JOIN products p ON p.id = s.product_id",
+                    [],
+                )?;
+                conn.execute("DROP TABLE sales", [])?;
+                conn.execute("ALTER TABLE sales_new RENAME TO sales", [])?;
+                Ok(())
+            })() {
+                let _ = conn.execute("ROLLBACK", []);
+                let _ = conn.execute("PRAGMA foreign_keys = ON;", []);
+                return Err(e.into());
+            }
+            conn.execute("COMMIT", [])?;
+            conn.execute("PRAGMA foreign_keys = ON;", [])?;
+            // Post-rebuild integrity assertion — hard fail on any violation.
+            let fk_violations: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |r| r.get(0),
+            )?;
+            if fk_violations > 0 {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    format!("v0.45.0 sales rebuild: {} foreign_key_check violations", fk_violations),
+                ));
+            }
+        }
+    }
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS customer_payments (

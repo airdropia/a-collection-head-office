@@ -22,6 +22,7 @@
  *   customers khata <id|name>          one customer + full ledger
  *   customers net                      net udhar summary (green/red)
  *   products list [--low-stock]        stock view
+ *   products zero-stock                active products with 0 stock (v0.45.0)
  *   sales recent [N]                   last N sales (default 10)
  *   report weekly                      7-day business digest (TG-ready text)
  *   db health                          integrity, counts, drift checks
@@ -207,8 +208,11 @@ function customersKhata(key: string) {
 
   // v0.35.0: full khata = sales (udhar balances) + payments ledger, merged by
   // date — mirrors the GUI app's get_customer_balance_history exactly.
+  // v0.45.0: item snapshot primary (frozen sale-time truth), product name
+  // fallback — khata survives product delete/rename (FK SET NULL).
   const saleRows = db.query(`
-    SELECT s.id, s.sale_date AS date, s.balance AS effect, s.qty, s.total_sale_amount, p.name AS product
+    SELECT s.id, s.sale_date AS date, s.balance AS effect, s.qty, s.total_sale_amount,
+           COALESCE(s.item_name, p.name) AS product
     FROM sales s LEFT JOIN products p ON p.id = s.product_id
     WHERE s.customer_id = ? AND COALESCE(s.reversed, 0) = 0
     ORDER BY s.sale_date, s.id`).all(c.id) as any[];
@@ -250,6 +254,32 @@ function customersKhata(key: string) {
     });
 }
 
+function productsZeroStock() {
+  // v0.45.0 (green-light addition #2): zero-stock ACTIVE products sweep —
+  // owner decision list (archive/restock) before the final catalog build.
+  // Same predicate as db health's zero_stock_but_active counter, now with
+  // names so each row can be adjudicated.
+  const rows = db.query(`
+    SELECT id, sku, product_code, name, category, status,
+           COALESCE(qty_in_head_office, stock_quantity, 0) AS qho,
+           COALESCE(qty_with_agents, 0) AS qwa,
+           COALESCE(qty_sold, 0) AS qs
+    FROM products
+    WHERE COALESCE(status, 'active') = 'active'
+      AND COALESCE(profit_status, 'in_head_office') != 'sold_out'
+      AND (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= 0
+    ORDER BY id`).all() as any[];
+
+  out(rows, () => {
+    console.log("PRODUCTS — ZERO STOCK, STILL ACTIVE (owner decision list)\n");
+    if (rows.length === 0) console.log("  none — catalog clean\n");
+    for (const r of rows) {
+      console.log(`  #${r.id}  ${String(r.product_code || r.sku).padEnd(14)} ${String(r.name).slice(0, 34).padEnd(34)} HO:${String(r.qho).padStart(3)} AG:${String(r.qwa).padStart(3)} SOLD:${String(r.qs).padStart(3)}`);
+    }
+    console.log(`\n  total: ${rows.length} — action: product-archive <sku> ya stock-add <id> <qty> (decision: owner)`);
+  });
+}
+
 function productsList(lowStockOnly: boolean) {
   const rows = db.query(`
     SELECT id, sku, product_code, name, category, status,
@@ -272,7 +302,8 @@ function productsList(lowStockOnly: boolean) {
 function salesRecent(n: number) {
   const rows = db.query(`
     SELECT s.id, s.sale_date, s.sale_channel, s.qty, s.total_sale_amount, s.amount_paid,
-           s.balance, s.customer_name, s.customer_id, s.agent_id, s.reversed, p.name AS product
+           s.balance, s.customer_name, s.customer_id, s.agent_id, s.reversed,
+           COALESCE(s.item_name, p.name) AS product
     FROM sales s LEFT JOIN products p ON p.id = s.product_id
     WHERE s.reversed = 0 ORDER BY s.sale_date DESC, s.id DESC LIMIT ?`).all(n) as any[];
 
@@ -373,7 +404,7 @@ function reportWeekly() {
     WHERE COALESCE(reversed, 0) = 0 AND sale_date >= date('now', '-7 days')
     GROUP BY sale_channel ORDER BY amt DESC`).all() as any[];
   const topProducts = db.query(`
-    SELECT s.product_id, COALESCE(p.name, '?') AS name,
+    SELECT s.product_id, COALESCE(s.item_name, p.name, '?') AS name,
            SUM(s.qty) AS qty, COALESCE(SUM(s.total_sale_amount), 0.0) AS amt
     FROM sales s LEFT JOIN products p ON p.id = s.product_id
     WHERE COALESCE(s.reversed, 0) = 0 AND s.sale_date >= date('now', '-7 days')
@@ -458,7 +489,8 @@ try {
       break;
     case "products":
       if (sub === "list") productsList(rest.includes("--low-stock"));
-      else die("usage: products list [--low-stock]");
+      else if (sub === "zero-stock") productsZeroStock();
+      else die("usage: products list [--low-stock] | zero-stock");
       break;
     case "sales":
       if (sub === "recent") salesRecent(Number(rest[0]) || 10);
@@ -482,6 +514,7 @@ DB: ${DB_PATH}
 
   customers list | net | khata <id|name>
   products list [--low-stock]
+  products zero-stock
   sales recent [N]
   report weekly
   db health

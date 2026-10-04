@@ -23,7 +23,7 @@
 //!                              [--brand B] [--fabric F] [--color C] [--retail R]
 //!                              [--purchase P] [--desc D]
 //!   acollectionho stock-add <product_id> <qty> [--notes N]
-//!   acollectionho product-delete <sku> [--yes]  (never-sold products only)
+//!   acollectionho product-delete <sku> [--yes]  (sales history safe — snapshots survive)
 //!   acollectionho product-archive <sku>  /  product-restore <sku>
 //!   acollectionho product-import-csv <path.csv>  /  product-export-csv <path.csv>
 //!   acollectionho backup-now  /  backup-list  /  backup-restore <file.db> [--yes]
@@ -74,9 +74,10 @@ Products (v0.41.0 — new-maal entry, replaces removed Purchase Trips):\n\
               restock existing article (+/-; negative = correction).\n\
               moves qty_in_head_office in lockstep with stock_quantity.\n\
   product-delete <sku> [--yes]\n\
-              remove a wrong/never-sold entry (smoke rows etc.).\n\
-              BLOCKED if any sale rows exist (audit trail) or agents\n\
-              hold stock; non-zero stock needs --yes confirm.\n\
+              remove a wrong/unused catalog entry. v0.45.0: sales history\n\
+              SURVIVES (sale rows keep item_name/item_sku snapshots;\n\
+              FK SET NULL). BLOCKED if agents hold stock; non-zero\n\
+              stock needs --yes confirm.\n\
   product-archive <sku>  |  product-restore <sku>\n\
               archive = catalog/publish/dashboard se GAYAB,\n\
               sales+ledger history salamat (kuch delete nahi hota).\n\
@@ -664,11 +665,14 @@ fn main() -> ExitCode {
             }
 
             "product-delete" => {
-                // v0.42.0: CLI removal path for wrong/never-sold entries
-                // (smoke rows, galat darj). Guards BEFORE delete:
-                //  - any sales rows (incl. reversed audit rows) -> BLOCKED;
-                //    FK is ON DELETE RESTRICT anyway, and the audit trail is
-                //    non-negotiable — no flag bypasses this
+                // v0.42.0: CLI removal path for wrong/unused catalog entries
+                // (smoke rows, galat darj).
+                // v0.45.0 (catalog-accounting decoupling, owner directive):
+                // the SALES guard is REMOVED — a product with sales history
+                // can now be deleted. Sale rows survive (FK ON DELETE SET
+                // NULL) and keep their v0.45.0 item_name/item_sku snapshots,
+                // so khata/report history stays fully readable. Remaining
+                // guards:
                 //  - qty_with_agents > 0 -> BLOCKED (agent_ledger rows would
                 //    SET NULL and unlink history)
                 //  - stock != 0 -> requires --yes (units get freed)
@@ -688,19 +692,6 @@ fn main() -> ExitCode {
                     )
                 })?;
                 let pid = p.id.unwrap_or(0);
-                let sales_rows: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM sales WHERE product_id = ?1",
-                        [pid],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if sales_rows > 0 {
-                    return Err(format!(
-                        "product '{}' (#{}): {} sale row(s) hain (audit trail) — delete BLOCKED. Becha hua article CLI se delete nahi hota.",
-                        p.sku, pid, sales_rows
-                    ));
-                }
                 let agents_qty = p.qty_with_agents.unwrap_or(0);
                 if agents_qty > 0 {
                     return Err(format!(
@@ -715,9 +706,17 @@ fn main() -> ExitCode {
                     ));
                 }
                 catalog::delete_product(&conn, pid).map_err(|e| e.to_string())?;
+                // v0.45.0: report how much sales history survived (snapshots)
+                let hist: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM sales WHERE item_sku = ?1",
+                        [&p.sku],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
                 println!(
-                    "OK: product #{} '{}' ({}) deleted — freed head-office stock: {}",
-                    pid, p.name, p.sku, p.stock_quantity
+                    "OK: product #{} '{}' ({}) deleted — freed head-office stock: {} ({} sale row(s) history intact via snapshots)",
+                    pid, p.name, p.sku, p.stock_quantity, hist
                 );
                 Ok(())
             }

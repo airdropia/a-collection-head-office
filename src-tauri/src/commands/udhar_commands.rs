@@ -57,7 +57,9 @@ pub async fn get_customer_balance_history(
     // ledger source of truth (they were showing after undo-sale).
     let mut stmt = conn
         .prepare(
-            "SELECT s.id, s.sale_date, p.name, s.qty, s.total_sale_amount, s.balance
+            // v0.45.0: item snapshot primary (frozen sale-time truth), product
+            // name as fallback — khata history survives product delete/rename.
+            "SELECT s.id, s.sale_date, COALESCE(s.item_name, p.name) AS item, s.qty, s.total_sale_amount, s.balance
          FROM sales s
          LEFT JOIN products p ON s.product_id = p.id
          WHERE s.customer_id = ?1 AND COALESCE(s.reversed, 0) = 0

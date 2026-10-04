@@ -1,6 +1,6 @@
 {
   "productName": "A Collection Head Office",
-  "version": "0.44.2",
+  "version": "0.45.0",
   "identifier": "com.airdropia.collectionheadoffice",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -36,7 +36,8 @@
         "language": "en-US"
       },
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "template": "./nsi/installer.nsi"
       }
     }
   }
