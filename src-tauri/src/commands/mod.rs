@@ -90,6 +90,7 @@ pub use sales_commands::{record_sale, undo_sale, reactivate_sold_product};
 pub use udhar_commands::{
     record_customer_payment, get_customer_balance_history,
     add_customer_ledger_entry, update_customer_ledger_entry, delete_customer_ledger_entry,
+    settle_advance_with_goods,
 };
 pub use catalog_publish_commands::{
     preview_catalog_publish, publish_catalog_to_github, get_catalog_publish_history,

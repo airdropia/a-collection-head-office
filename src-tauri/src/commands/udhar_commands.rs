@@ -198,6 +198,41 @@ pub async fn get_customer_balance_history(
 // Edit + delete operations recompute the customer's outstanding_balance
 // from scratch (SUM of all entries) to ensure consistency.
 
+/// v0.45.1 — goods-form advance settlement (GUI Settle Debt goods path;
+/// approved feature, directive 5978080112). Settles the customer's advance
+/// (RED) bucket by handing over stock in ONE transaction — see
+/// customers::settle_advance_with_goods_impl for the full contract.
+#[derive(serde::Serialize)]
+pub struct GoodsSettleResult {
+    pub entry_id: i64,
+    pub amount: f64,
+    pub product_id: i64,
+    pub qty: i64,
+}
+
+#[tauri::command]
+pub async fn settle_advance_with_goods(
+    state: State<'_, DbState>,
+    customer_id: i64,
+    product_id: i64,
+    qty: i64,
+    amount: Option<f64>,
+    notes: Option<String>,
+    date: Option<String>,
+) -> Result<GoodsSettleResult, String> {
+    let conn = state.0.lock().await;
+    let (entry_id, amt) = customers::settle_advance_with_goods_impl(
+        &conn,
+        customer_id,
+        product_id,
+        qty,
+        amount,
+        notes.as_deref(),
+        date.as_deref(),
+    )?;
+    Ok(GoodsSettleResult { entry_id, amount: amt, product_id, qty })
+}
+
 /// Add a manual ledger entry for a customer.
 ///
 /// - entry_type = "opening_debit": amount must be > 0, increases balance

@@ -249,8 +249,13 @@ pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // Fetch sale details
+    // v0.45.1: product_id is Option — it becomes NULL when the product was
+    // hard-deleted after the sale (v0.45.0 FK ON DELETE SET NULL). A plain
+    // i64 here crashed with rusqlite InvalidColumnType on such sales
+    // (drill T6-EDGE: "Invalid column type Null at index: 0, name: product_id"),
+    // making mis-booked sales of deleted products permanently un-undoable.
     let (product_id, qty, agent_id, customer_id, balance, sale_channel): (
-        i64,
+        Option<i64>,
         i64,
         Option<i64>,
         Option<i64>,
@@ -308,13 +313,18 @@ pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
 
     // Reverse stock effects
     if agent_id.is_some() {
-        // Was agent sale — restore agent stock, reduce sold
-        if let Err(e) = conn.execute(
-            "UPDATE products SET qty_with_agents = qty_with_agents + ?1, qty_sold = MAX(0, qty_sold - ?2), updated_at = ?3 WHERE id = ?4",
-            rusqlite::params![qty, qty, &now, product_id],
-        ) {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(format!("Failed to restore agent stock: {}", e));
+        // Was agent sale — restore agent stock, reduce sold.
+        // v0.45.1: with a deleted product (product_id NULL) the product row
+        // no longer exists — there is no stock to restore; the agent-ledger
+        // cleanup and the khata reversal below still run.
+        if let Some(pid) = product_id {
+            if let Err(e) = conn.execute(
+                "UPDATE products SET qty_with_agents = qty_with_agents + ?1, qty_sold = MAX(0, qty_sold - ?2), updated_at = ?3 WHERE id = ?4",
+                rusqlite::params![qty, qty, &now, pid],
+            ) {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(format!("Failed to restore agent stock: {}", e));
+            }
         }
         // Remove the sale_reported ledger entry (find by matching attributes,
         // pick the most recent one). SQLite DELETE doesn't support LIMIT
@@ -336,8 +346,11 @@ pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
             .unwrap_or_default();
         let ledger_entry_id: Option<i64> = conn
             .query_row(
+                // v0.45.1: `IS` not `=` — agent_ledger_entries.product_id has
+                // the same FK ON DELETE SET NULL, so a deleted product leaves
+                // this row with NULL product_id; `IS ?2` matches both cases.
                 "SELECT id FROM agent_ledger_entries
-             WHERE agent_id = ?1 AND product_id = ?2 AND entry_type = 'sale_reported'
+             WHERE agent_id = ?1 AND product_id IS ?2 AND entry_type = 'sale_reported'
              AND qty = ?3 AND amount = ?4 AND entry_date = ?5
              ORDER BY id DESC LIMIT 1",
                 rusqlite::params![agent_id, product_id, qty, amount, &sale_date],
@@ -354,13 +367,17 @@ pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
             }
         }
     } else {
-        // Was direct HO sale — restore HO stock, reduce sold
-        if let Err(e) = conn.execute(
-            "UPDATE products SET qty_in_head_office = qty_in_head_office + ?1, stock_quantity = stock_quantity + ?2, qty_sold = MAX(0, qty_sold - ?3), updated_at = ?4 WHERE id = ?5",
-            rusqlite::params![qty, qty, qty, &now, product_id],
-        ) {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(format!("Failed to restore HO stock: {}", e));
+        // Was direct HO sale — restore HO stock, reduce sold.
+        // v0.45.1: skip when product_id is NULL (product deleted — nothing
+        // to restore; khata reversal below still runs).
+        if let Some(pid) = product_id {
+            if let Err(e) = conn.execute(
+                "UPDATE products SET qty_in_head_office = qty_in_head_office + ?1, stock_quantity = stock_quantity + ?2, qty_sold = MAX(0, qty_sold - ?3), updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![qty, qty, qty, &now, pid],
+            ) {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(format!("Failed to restore HO stock: {}", e));
+            }
         }
     }
 
@@ -394,24 +411,28 @@ pub fn undo_sale_impl(conn: &Connection, sale_id: i64) -> Result<(), String> {
     }
 
     // Recalculate product.profit_status
-    let (ho_qty, agent_qty): (i64, i64) = conn.query_row(
-        "SELECT COALESCE(qty_in_head_office, 0), COALESCE(qty_with_agents, 0) FROM products WHERE id = ?1",
-        rusqlite::params![product_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap_or((0, 0));
-    let new_status = if ho_qty == 0 && agent_qty == 0 {
-        "sold_out"
-    } else if ho_qty == 0 && agent_qty > 0 {
-        "with_agent"
-    } else {
-        "in_head_office"
-    };
-    if let Err(e) = conn.execute(
-        "UPDATE products SET profit_status = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![new_status, &now, product_id],
-    ) {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(format!("Failed to update profit_status: {}", e));
+    // v0.45.1: product-scoped — skipped entirely when the product was
+    // deleted (product_id NULL); no product row to recompute.
+    if let Some(pid) = product_id {
+        let (ho_qty, agent_qty): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(qty_in_head_office, 0), COALESCE(qty_with_agents, 0) FROM products WHERE id = ?1",
+            rusqlite::params![pid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap_or((0, 0));
+        let new_status = if ho_qty == 0 && agent_qty == 0 {
+            "sold_out"
+        } else if ho_qty == 0 && agent_qty > 0 {
+            "with_agent"
+        } else {
+            "in_head_office"
+        };
+        if let Err(e) = conn.execute(
+            "UPDATE products SET profit_status = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![new_status, &now, pid],
+        ) {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(format!("Failed to update profit_status: {}", e));
+        }
     }
 
     // (v0.44.1: sale marked reversed earlier in this transaction — before

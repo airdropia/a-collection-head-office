@@ -13,6 +13,12 @@ ManifestDPIAwareness PerMonitorV2
   SetCompressor /SOLID "{{compression}}"
 !endif
 
+; Keep above !include to stay ahead of any plugin command
+; see https://github.com/tauri-apps/tauri/pull/15422#discussion_r3289239624
+{{#if signed_plugins_path}}
+!addplugindir "{{signed_plugins_path}}"
+{{/if}}
+
 !include MUI2.nsh
 !include FileFunc.nsh
 !include x64.nsh
@@ -21,6 +27,7 @@ ManifestDPIAwareness PerMonitorV2
 !include "FileAssociation.nsh"
 !include "Win\COM.nsh"
 !include "Win\Propkey.nsh"
+!include "Win\RestartManager.nsh"
 !include "StrFunc.nsh"
 ${StrCase}
 ${StrLoc}
@@ -41,13 +48,15 @@ ${StrLoc}
 !define INSTALLERICON "{{installer_icon}}"
 !define SIDEBARIMAGE "{{sidebar_image}}"
 !define HEADERIMAGE "{{header_image}}"
+!define UNINSTALLERICON "{{uninstaller_icon}}"
+!define UNINSTALLERHEADERIMAGE "{{uninstaller_header_image}}"
 !define MAINBINARYNAME "{{main_binary_name}}"
 !define MAINBINARYSRCPATH "{{main_binary_path}}"
 !define BUNDLEID "{{bundle_id}}"
 !define COPYRIGHT "{{copyright}}"
 !define OUTFILE "{{out_file}}"
 !define ARCH "{{arch}}"
-!define PLUGINSPATH "{{additional_plugins_path}}"
+!define ADDITIONALPLUGINSPATH "{{additional_plugins_path}}"
 !define ALLOWDOWNGRADES "{{allow_downgrades}}"
 !define DISPLAYLANGUAGESELECTOR "{{display_language_selector}}"
 !define INSTALLWEBVIEW2MODE "{{install_webview2_mode}}"
@@ -56,7 +65,8 @@ ${StrLoc}
 !define WEBVIEW2INSTALLERPATH "{{webview2_installer_path}}"
 !define MINIMUMWEBVIEW2VERSION "{{minimum_webview2_version}}"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
-!define MANUPRODUCTKEY "Software\${MANUFACTURER}\${PRODUCTNAME}"
+!define MANUKEY "Software\${MANUFACTURER}"
+!define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
@@ -84,10 +94,8 @@ VIAddVersionKey "LegalCopyright" "${COPYRIGHT}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 
-; Plugins path, currently exists for linux only
-!if "${PLUGINSPATH}" != ""
-    !addplugindir "${PLUGINSPATH}"
-!endif
+# additional plugins
+!addplugindir "${ADDITIONALPLUGINSPATH}"
 
 ; Uninstaller signing command
 !if "${UNINSTALLERSIGNCOMMAND}" != ""
@@ -96,7 +104,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; Handle install mode, `perUser`, `perMachine` or `both`
 !if "${INSTALLMODE}" == "perMachine"
-  RequestExecutionLevel highest
+  RequestExecutionLevel admin
 !endif
 
 !if "${INSTALLMODE}" == "currentUser"
@@ -130,10 +138,26 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
   !define MUI_WELCOMEFINISHPAGE_BITMAP "${SIDEBARIMAGE}"
 !endif
 
-; Installer header image
+; Enable header images for installer and uninstaller pages when either image is configured.
 !if "${HEADERIMAGE}" != ""
   !define MUI_HEADERIMAGE
-  !define MUI_HEADERIMAGE_BITMAP  "${HEADERIMAGE}"
+!else if "${UNINSTALLERHEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE
+!endif
+
+; Installer header image
+!if "${HEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE_BITMAP "${HEADERIMAGE}"
+!endif
+
+; Uninstaller header image
+!if "${UNINSTALLERHEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE_UNBITMAP "${UNINSTALLERHEADERIMAGE}"
+!endif
+
+; Uninstaller icon
+!if "${UNINSTALLERICON}" != ""
+  !define MUI_UNICON "${UNINSTALLERICON}"
 !endif
 
 ; Define registry key to store installer language
@@ -237,7 +261,7 @@ Function PageReinstall
 
   ; Skip showing the page if passive
   ;
-  ; Note that we don't call this earlier at the begining
+  ; Note that we don't call this earlier at the beginning
   ; of this function because we need to populate some variables
   ; related to current installed version if detected and whether
   ; we are downgrading or not.
@@ -354,7 +378,7 @@ Function PageLeaveReinstall
         Abort
       ${EndIf}
 
-      ; Other erros? show generic error message and return to select un/reinstall page
+      ; Other errors? show generic error message and return to select un/reinstall page
       MessageBox MB_ICONEXCLAMATION "$(unableToUninstall)"
       Abort
     ${EndIf}
@@ -387,16 +411,17 @@ Var AppStartMenuFolder
 !define MUI_FINISHPAGE_SHOWREADME
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "$(createDesktop)"
 !define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateOrUpdateDesktopShortcut
-; Show run app after installation — REMOVED v0.45.0 (architect decision,
-; Crush 3-cycle evidence): silent /S installs auto-launched the GUI app
-; (NSIS MUI2 fires MUI_FINISHPAGE_RUN in silent mode). Drill hygiene +
-; restore-with-app-open hazard both require install WITHOUT auto-launch.
+; Show run app after installation — REMOVED v0.45.1 (architect decision;
+; Crush 4-cycle evidence, v0.45.0 T1 FAIL). Root cause of the v0.45.0 miss:
+; @tauri-apps/cli 2.0.3 did not support bundle.windows.nsis.template, so this
+; template was never compiled and the embedded default kept auto-launching
+; the GUI app on silent /S installs (MUI2 fires the finish-page leave callback
+; even when pages are skipped). Template is now extracted from the SAME CLI
+; version (2.12.1) with both MUI_FINISHPAGE_RUN defines and RunMainBinary
+; removed — install must NEVER open the app (drill hygiene + restore-with-
+; app-open hazard). Re-extract + re-apply on CLI upgrades.
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
 !insertmacro MUI_PAGE_FINISH
-
-Function RunMainBinary
-  nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
-FunctionEnd
 
 ; Uninstaller Pages
 ; 1. Confirm uninstall page
@@ -620,7 +645,7 @@ Section Install
     !insertmacro NSIS_HOOK_PREINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -630,12 +655,12 @@ Section Install
     CreateDirectory "$INSTDIR\\{{this}}"
   {{/each}}
   {{#each resources}}
-    File /a "/oname={{this.[1]}}" "{{@key}}"
+    File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
   {{/each}}
 
   ; Copy external binaries
   {{#each binaries}}
-    File /a "/oname={{this}}" "{{@key}}"
+    File /a "/oname={{this}}" "{{no-escape @key}}"
   {{/each}}
 
   ; Create file associations
@@ -757,7 +782,7 @@ Section Uninstall
     !insertmacro NSIS_HOOK_PREUNINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
@@ -835,12 +860,27 @@ Section Uninstall
     DeleteRegKey HKCU "${UNINSTKEY}"
   !endif
 
-  DeleteRegValue HKCU "${MANUPRODUCTKEY}" "Installer Language"
+  ; Removes the Autostart entry for ${PRODUCTNAME} from the HKCU Run key if it exists.
+  ; This ensures the program does not launch automatically after uninstallation if it exists.
+  ; If it doesn't exist, it does nothing.
+  ; We do this when not updating (to preserve the registry value on updates)
+  ${If} $UpdateMode <> 1
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+  ${EndIf}
 
   ; Delete app data if the checkbox is selected
   ; and if not updating
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
+    ; Clear the install location $INSTDIR from registry
+    DeleteRegKey SHCTX "${MANUPRODUCTKEY}"
+    DeleteRegKey /ifempty SHCTX "${MANUKEY}"
+
+    ; Clear the install language from registry
+    DeleteRegValue HKCU "${MANUPRODUCTKEY}" "Installer Language"
+    DeleteRegKey /ifempty HKCU "${MANUPRODUCTKEY}"
+    DeleteRegKey /ifempty HKCU "${MANUKEY}"
+
     SetShellVarContext current
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"

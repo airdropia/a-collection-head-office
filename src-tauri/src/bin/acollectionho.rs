@@ -17,6 +17,7 @@
 //!   acollectionho pay-customer <customer_id> <amount> [--notes N] [--sale ID]
 //!   acollectionho manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]
 //!   acollectionho advance-return <customer_id> <amount> [--notes N] [--date D]
+//!   acollectionho advance-return <customer_id> --product-id P --qty Q [--amount A] [--notes N] [--date D]
 //!   acollectionho customer-add --name N [--phone P] [--location L] [--notes N]
 //!   acollectionho customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]
 //!   acollectionho product-add <sku> <name> <cost> <sale> [qty] [--category C]
@@ -60,7 +61,8 @@ fn print_usage() {
 Writes (reuse the GUI app's exact business logic):\n\
   pay-customer <customer_id> <amount> [--notes N] [--sale ID]\n\
   manual-entry <customer_id> <opening_debit|adjustment> <amount> [--notes N] [--date D]\n\
-  advance-return <customer_id> <amount> [--notes N] [--date D]\n\
+  advance-return <customer_id> <amount> [--notes N] [--date D]  (cash settle)\n\
+  advance-return <customer_id> --product-id P --qty Q [--amount A] [--notes N] [--date D]  (v0.45.1 goods settle)\n\
   customer-add --name N [--phone P] [--location L] [--notes N]\n\
   customer-edit <id> [--name N] [--phone P] [--location L] [--notes N]\n\
 \n\
@@ -375,29 +377,113 @@ fn main() -> ExitCode {
                 // v0.44.1: settle the RED bucket — hum ne advance wale customer
                 // ko cash/maal diya advance ke badle. NO cross-bucket netting:
                 // ye sirf advance_gross kam karta hai, udhaar ko nahi chhoota.
-                if rest.len() < 2 {
-                    return Err("usage: advance-return <customer_id> <amount> [--notes N] [--date D]".into());
+                // v0.45.1 (directive 5978080112): goods form —
+                //   advance-return <cid> --product-id P --qty Q [--amount A]
+                // settles with STOCK in one transaction (Haji flow: cloth
+                // instead of cash). No --product-id => cash path (unchanged).
+                let cid: i64 = match rest.first() {
+                    Some(v) => v.parse()
+                        .map_err(|_| "customer_id must be numeric".to_string())?,
+                    None => return Err(
+                        "usage: advance-return <customer_id> <amount> [--notes N] [--date D]\n       advance-return <customer_id> --product-id P --qty Q [--amount A] [--notes N] [--date D]".into(),
+                    ),
+                };
+                // Manual flag scan (parse_opts dies on unknown flags; the
+                // goods flags are arm-local).
+                let mut product_id: Option<i64> = None;
+                let mut qty: Option<i64> = None;
+                let mut amount_opt: Option<f64> = None;
+                let mut notes: Option<String> = None;
+                let mut date: Option<String> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--product-id" => {
+                            i += 1;
+                            product_id = rest.get(i).and_then(|v| v.parse().ok());
+                            if product_id.is_none() {
+                                return Err("--product-id needs a numeric id".into());
+                            }
+                        }
+                        "--qty" => {
+                            i += 1;
+                            qty = rest.get(i).and_then(|v| v.parse().ok());
+                            if qty.is_none() {
+                                return Err("--qty needs a number".into());
+                            }
+                        }
+                        "--amount" => {
+                            i += 1;
+                            amount_opt = rest.get(i).and_then(|v| v.parse().ok());
+                            if amount_opt.is_none() {
+                                return Err("--amount needs a number".into());
+                            }
+                        }
+                        "--notes" => {
+                            i += 1;
+                            notes = rest.get(i).cloned();
+                        }
+                        "--date" => {
+                            i += 1;
+                            date = rest.get(i).cloned();
+                        }
+                        other => return Err(format!(
+                            "unknown option '{}' — usage: advance-return <customer_id> [<amount> | --product-id P --qty Q] [--notes N] [--date D]",
+                            other
+                        )),
+                    }
+                    i += 1;
                 }
-                let cid: i64 = rest[0]
-                    .parse()
-                    .map_err(|_| "customer_id must be numeric".to_string())?;
-                let amount: f64 = rest[1].parse().map_err(|_| {
-                    "amount must be numeric (positive)".to_string()
-                })?;
-                let o = parse_opts(&rest[2..]);
                 let conn = open_db();
-                let id = customers::add_manual_entry_impl(
-                    &conn,
-                    cid,
-                    "advance_return",
-                    amount,
-                    o.notes.as_deref(),
-                    o.date.as_deref(),
-                )?;
-                println!(
-                    "OK: advance_return Rs. {:.0} recorded for customer #{} (ledger id {})",
-                    amount, cid, id
-                );
+                match (product_id, qty) {
+                    (Some(pid), Some(q)) => {
+                        // v0.45.1 goods settle — one transaction inside impl:
+                        // active+stock validation, amount = qty * sale_price
+                        // (or --amount), over-settle reject, advance_return
+                        // ledger row, stock decrement, bucket recompute.
+                        let (id, amount) = customers::settle_advance_with_goods_impl(
+                            &conn,
+                            cid,
+                            pid,
+                            q,
+                            amount_opt,
+                            notes.as_deref(),
+                            date.as_deref(),
+                        )?;
+                        println!(
+                            "OK: advance settled with goods Rs. {:.0} for customer #{} (product #{} qty {}, ledger id {})",
+                            amount, cid, pid, q, id
+                        );
+                    }
+                    (None, None) => {
+                        if amount_opt.is_some() {
+                            return Err(
+                                "--amount is only valid with --product-id (cash path takes a positional amount)".into(),
+                            );
+                        }
+                        let amount: f64 = rest.get(1)
+                            .ok_or(
+                                "usage: advance-return <customer_id> <amount> [--notes N] [--date D]",
+                            )?
+                            .parse()
+                            .map_err(|_| "amount must be numeric (positive)".to_string())?;
+                        let id = customers::add_manual_entry_impl(
+                            &conn,
+                            cid,
+                            "advance_return",
+                            amount,
+                            notes.as_deref(),
+                            date.as_deref(),
+                        )?;
+                        println!(
+                            "OK: advance_return Rs. {:.0} recorded for customer #{} (ledger id {})",
+                            amount, cid, id
+                        );
+                    }
+                    _ => return Err(
+                        "goods settle needs BOTH --product-id and --qty (cash path needs neither)".into(),
+                    ),
+                }
                 Ok(())
             }
 

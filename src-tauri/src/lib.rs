@@ -92,6 +92,8 @@ pub fn run() {
             commands::udhar_commands::add_customer_ledger_entry,
             commands::udhar_commands::update_customer_ledger_entry,
             commands::udhar_commands::delete_customer_ledger_entry,
+            // v0.45.1 — goods-form advance settlement (Settle Debt goods path)
+            commands::udhar_commands::settle_advance_with_goods,
             // v0.15.0 — Public Catalog Publishing
             commands::catalog_publish_commands::preview_catalog_publish,
             commands::catalog_publish_commands::publish_catalog_to_github,

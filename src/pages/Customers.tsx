@@ -46,6 +46,14 @@ export default function Customers() {
   const [balanceHistory, setBalanceHistory] = useState<any[]>([])
   const [showBalanceHistory, setShowBalanceHistory] = useState(false)
 
+  // v0.45.1: goods-form advance settlement (Settle Debt goods path — Haji
+  // flow: cloth instead of cash). Products are lazy-loaded when the modal
+  // opens for a negative-balance customer; amount auto = qty * sale_price.
+  const [settleGoodsMode, setSettleGoodsMode] = useState(false)
+  const [settleProducts, setSettleProducts] = useState<any[]>([])
+  const [settleProductId, setSettleProductId] = useState<number | null>(null)
+  const [settleQty, setSettleQty] = useState(1)
+
   const [showLedgerEntryModal, setShowLedgerEntryModal] = useState(false)
   // v0.34.0: Direction of ledger entry — 'udhaar' (customer owes us, positive) or
   // 'advance' (we owe customer / they paid in advance, negative). Sign is derived
@@ -127,7 +135,22 @@ export default function Customers() {
     setPaymentCustomer(customer)
     setPaymentAmount(Math.abs(customer.outstanding_balance || 0))
     setPaymentNotes('')
+    // v0.45.1: reset goods-settle state; load settleable stock only when
+    // this is a debt-settlement (negative balance = advance bucket > 0).
+    setSettleGoodsMode(false)
+    setSettleProductId(null)
+    setSettleQty(1)
     setShowPaymentModal(true)
+    if ((customer.outstanding_balance || 0) < 0) {
+      invoke<any[]>('get_products')
+        .then(rows => {
+          setSettleProducts((rows || []).filter((p: any) =>
+            (p.status ?? 'active') === 'active' &&
+            ((p.qty_in_head_office ?? p.stock_quantity ?? 0) > 0)
+          ))
+        })
+        .catch(() => setSettleProducts([]))
+    }
   }
 
   const handleRecordPayment = async () => {
@@ -142,6 +165,27 @@ export default function Customers() {
           notes: paymentNotes || null,
           saleId: null,
         })
+      } else if (settleGoodsMode && settleProductId) {
+        // v0.45.1: settle the advance bucket with STOCK (Haji flow) — one
+        // backend transaction: stock decrement + advance_return ledger row
+        // + bucket recompute. Amount is computed from qty * sale_price.
+        if (settleQty <= 0) { alert('Quantity must be positive.'); return }
+        const res = await invoke<any>('settle_advance_with_goods', {
+          customerId: paymentCustomer.id,
+          productId: settleProductId,
+          qty: settleQty,
+          amount: null,
+          notes: paymentNotes || null,
+          date: null,
+        })
+        setShowPaymentModal(false)
+        await fetchCustomers()
+        alert(`Goods se settle ho gaya! Rs. ${(res?.amount ?? 0).toFixed(0)} — ${paymentCustomer.name}`)
+        return
+      } else if (settleGoodsMode) {
+        // goods toggle ON but no product chosen — do NOT fall through to cash
+        alert('Product select karen (ya Cash mode par wapas jayen).')
+        return
       } else {
         // v0.44.1: settle the RED bucket via the explicit advance_return
         // entry type (no-netting rule). A negative adjustment would now
@@ -162,6 +206,10 @@ export default function Customers() {
       alert(`Error: ${err}`)
     }
   }
+
+  // v0.45.1: derived goods-settle values (amount auto = qty * sale_price)
+  const settleProduct = settleProducts.find(p => p.id === settleProductId) || null
+  const settleGoodsAmount = settleProduct ? settleQty * (settleProduct.sale_price || 0) : 0
 
   // v0.26.0: Show customer's balance history (sales + payments timeline)
   const handleShowBalanceHistory = async (customer: Customer) => {
@@ -652,6 +700,53 @@ export default function Customers() {
                   {fmtMoney(Math.abs(paymentCustomer.outstanding_balance || 0))}
                 </span>
               </div>
+              {/* v0.45.1: settle mode toggle — goods form only for debt settlement */}
+              {(paymentCustomer.outstanding_balance || 0) < 0 && (
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => setSettleGoodsMode(false)}
+                    className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${!settleGoodsMode ? 'bg-violet-600 text-white' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}`}
+                  >Cash se settle</button>
+                  <button
+                    onClick={() => setSettleGoodsMode(true)}
+                    className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${settleGoodsMode ? 'bg-violet-600 text-white' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}`}
+                  >Maal se settle (kapra)</button>
+                </div>
+              )}
+              {settleGoodsMode && (paymentCustomer.outstanding_balance || 0) < 0 ? (
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Product (active stock)</label>
+                    <select
+                      value={settleProductId ?? ''}
+                      onChange={e => { setSettleProductId(e.target.value ? Number(e.target.value) : null); setSettleQty(1) }}
+                      className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
+                    >
+                      <option value="">— select product —</option>
+                      {settleProducts.map(p => (
+                        <option key={p.id} value={p.id}>
+                          #{p.id} — {p.product_code || p.sku} — {p.name} (HO: {p.qty_in_head_office ?? p.stock_quantity ?? 0})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Quantity</label>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={settleQty}
+                      onChange={e => setSettleQty(Math.max(1, Number(e.target.value)))}
+                      className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
+                    />
+                  </div>
+                  <div className="rounded-lg p-3 border bg-sky-900/10 border-sky-700/30">
+                    <span className="text-xs font-semibold text-sky-300">Settle value (qty × sale price)</span>
+                    <p className="text-lg font-bold text-sky-400">{fmtMoney(settleGoodsAmount)}</p>
+                  </div>
+                </div>
+              ) : (
               <div>
                 <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Payment Amount</label>
                 <input
@@ -666,6 +761,7 @@ export default function Customers() {
                   New balance after payment: <span className="text-gray-400">{fmtMoney((paymentCustomer.outstanding_balance || 0) + ((paymentCustomer.outstanding_balance || 0) >= 0 ? -paymentAmount : paymentAmount))}</span>
                 </p>
               </div>
+              )}
               <div>
                 <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Notes (optional)</label>
                 <input
@@ -678,7 +774,9 @@ export default function Customers() {
               </div>
               <div className="flex gap-2 pt-2">
                 <button onClick={() => setShowPaymentModal(false)} className="flex-1 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-gray-200 rounded-lg text-sm">Cancel</button>
-                <button onClick={handleRecordPayment} className="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium">Save Payment</button>
+                <button onClick={handleRecordPayment} className="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium">
+                  {settleGoodsMode && (paymentCustomer.outstanding_balance || 0) < 0 ? 'Settle with Goods' : 'Save Payment'}
+                </button>
               </div>
             </div>
           </div>

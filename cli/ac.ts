@@ -254,20 +254,28 @@ function customersKhata(key: string) {
     });
 }
 
+// v0.45.1 (drill T7 finding): ONE canonical zero-stock-active predicate.
+// db health's counter and `products zero-stock` MUST agree — they drifted
+// in the 2026-10-04 drill (health counted archived products: 6 vs 0) because
+// the health query lacked the status filter. Single source here; if the
+// Rust layer ever grows a zero-stock counter, keep it term-equal.
+const ZERO_STOCK_ACTIVE_WHERE = `
+    COALESCE(status, 'active') = 'active'
+      AND COALESCE(profit_status, 'in_head_office') != 'sold_out'
+      AND (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= 0`;
+
 function productsZeroStock() {
   // v0.45.0 (green-light addition #2): zero-stock ACTIVE products sweep —
   // owner decision list (archive/restock) before the final catalog build.
-  // Same predicate as db health's zero_stock_but_active counter, now with
-  // names so each row can be adjudicated.
+  // v0.45.1: uses the shared ZERO_STOCK_ACTIVE_WHERE constant (identical
+  // predicate as db health's zero_stock_but_active counter — by construction).
   const rows = db.query(`
     SELECT id, sku, product_code, name, category, status,
            COALESCE(qty_in_head_office, stock_quantity, 0) AS qho,
            COALESCE(qty_with_agents, 0) AS qwa,
            COALESCE(qty_sold, 0) AS qs
     FROM products
-    WHERE COALESCE(status, 'active') = 'active'
-      AND COALESCE(profit_status, 'in_head_office') != 'sold_out'
-      AND (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents, 0)) <= 0
+    WHERE ${ZERO_STOCK_ACTIVE_WHERE}
     ORDER BY id`).all() as any[];
 
   out(rows, () => {
@@ -335,10 +343,10 @@ function dbHealth() {
   let walBytes = 0;
   try { walBytes = statSync(DB_PATH + "-wal").size; } catch {}
 
+  // v0.45.1: shared ZERO_STOCK_ACTIVE_WHERE (status filter added — was
+  // counting archived products, drill T7: 6 vs products zero-stock's 0).
   const staleStock = db.query(`
-    SELECT COUNT(*) AS c FROM products
-    WHERE COALESCE(profit_status,'in_head_office') != 'sold_out'
-      AND (COALESCE(qty_in_head_office, stock_quantity, 0) + COALESCE(qty_with_agents,0)) <= 0`).get() as any;
+    SELECT COUNT(*) AS c FROM products WHERE ${ZERO_STOCK_ACTIVE_WHERE}`).get() as any;
 
   const result = {
     db_path: DB_PATH,
@@ -467,11 +475,15 @@ function version() {
     const conf = JSON.parse(require("node:fs").readFileSync(join(process.cwd(), "src-tauri", "tauri.conf.json"), "utf8"));
     app = conf?.version ?? "unknown";
   } catch {}
-  out({ cli_phase: "A (read-only)", app_version_in_repo: app, db_path: DB_PATH },
+  // v0.45.1 (drill T5 note): stale ac.ts copies on the drill machine produced
+  // a phantom "? x1" khata finding — print the RUNNING file path so any
+  // tools-dir/checkout confusion is visible in one command.
+  out({ cli_phase: "A (read-only)", app_version_in_repo: app, running_from: import.meta.path, db_path: DB_PATH },
     () => {
       console.log("VERSION\n");
       console.log(`  CLI phase          : A (read-only) — writes ship in Phase B (acollectionho.exe, CI-built)`);
       console.log(`  app version (repo) : ${app}`);
+      console.log(`  running from       : ${import.meta.path}`);
       console.log(`  db path            : ${DB_PATH}`);
     });
 }

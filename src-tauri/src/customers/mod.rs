@@ -560,3 +560,157 @@ pub fn add_manual_entry_impl(
 
     Ok(entry_id)
 }
+
+/// v0.45.1 — goods-form advance settlement (approved feature, directive
+/// 5978080112; owner's Haji flow): settle the customer's advance (RED)
+/// bucket by handing over stock — cloth instead of cash. ONE transaction:
+///   1. validate customer + product (active, available HO stock >= qty)
+///   2. settle value = qty * product.sale_price (or explicit override)
+///   3. over-settle reject: value must be <= the FRESH advance bucket
+///      (same floor as cash advance_return — recompute inside the tx)
+///   4. INSERT customer_payments entry_type='advance_return' — SAME red-settle
+///      semantics as cash (no new entry type; canonical buckets untouched)
+///   5. decrement product stock (qty_in_head_office + stock_quantity).
+///      qty_sold is deliberately NOT incremented: goods settlement is not a
+///      sale — no revenue row, no profit_status change. If the product hits
+///      zero it will surface in the zero-stock sweep (owner decision list).
+///   6. recompute buckets; COMMIT (any failure -> full ROLLBACK)
+pub fn settle_advance_with_goods_impl(
+    conn: &Connection,
+    customer_id: i64,
+    product_id: i64,
+    qty: i64,
+    amount_override: Option<f64>,
+    notes: Option<&str>,
+    date: Option<&str>,
+) -> Result<(i64, f64), String> {
+    if qty <= 0 {
+        return Err("Quantity must be positive.".to_string());
+    }
+    if let Some(a) = amount_override {
+        if a <= 0.0 {
+            return Err("Settle amount must be positive.".to_string());
+        }
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry_date = date.unwrap_or(&now);
+
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| e.to_string())?;
+
+    if conn
+        .query_row(
+            "SELECT id FROM customers WHERE id = ?1",
+            params![customer_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .is_err()
+    {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Customer not found: {}", customer_id));
+    }
+
+    // Product must exist, be active, and have enough HO stock.
+    let (prod_name, sale_price, available): (String, f64, i64) = conn
+        .query_row(
+            "SELECT name, sale_price, COALESCE(qty_in_head_office, stock_quantity, 0)
+             FROM products
+             WHERE id = ?1 AND COALESCE(status, 'active') = 'active'",
+            params![product_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|e| {
+            let _ = conn.execute("ROLLBACK", []);
+            if e == rusqlite::Error::QueryReturnedNoRows {
+                format!("Product not found (or not active): {}", product_id)
+            } else {
+                format!("Failed to load product: {}", e)
+            }
+        })?;
+    if available < qty {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!(
+            "Insufficient stock for '{}' (available {}, requested {}).",
+            prod_name, available, qty
+        ));
+    }
+
+    let amount = amount_override.unwrap_or(sale_price * qty as f64);
+    if amount <= 0.0 {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err("Settle amount must be positive.".to_string());
+    }
+
+    // Over-settle floor: same rule as cash advance_return (v0.44.1).
+    // Fresh compute inside the transaction — never trust the cache.
+    let b = match compute_customer_buckets(conn, customer_id) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e);
+        }
+    };
+    if amount > b.advance_gross + 0.004 {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!(
+            "Goods settle (Rs. {:.0}) exceeds the customer's advance bucket (Rs. {:.0}).",
+            amount, b.advance_gross
+        ));
+    }
+
+    let default_notes = format!(
+        "Advance settled with goods: {} x {} @ Rs. {:.0}",
+        qty, prod_name, sale_price
+    );
+    let entry_notes = match notes {
+        Some(n) if !n.trim().is_empty() => format!("{} — {}", default_notes, n.trim()),
+        _ => default_notes,
+    };
+
+    let res = conn.execute(
+        "INSERT INTO customer_payments (customer_id, amount, payment_date, notes, sale_id, entry_type, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, 'advance_return', ?5, ?6)",
+        params![customer_id, amount, entry_date, entry_notes, &now, &now],
+    );
+    if let Err(e) = res {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to insert ledger entry: {}", e));
+    }
+    let entry_id = conn.last_insert_rowid();
+
+    // Stock decrement — guarded by available-stock predicate so a concurrent
+    // writer cannot drive stock negative (0 rows affected => reject).
+    let n = conn
+        .execute(
+            "UPDATE products
+             SET qty_in_head_office = COALESCE(qty_in_head_office, stock_quantity, 0) - ?1,
+                 stock_quantity = COALESCE(stock_quantity, qty_in_head_office, 0) - ?2,
+                 updated_at = ?4
+             WHERE id = ?3
+               AND COALESCE(qty_in_head_office, stock_quantity, 0) >= ?1",
+            params![qty, qty, product_id, &now],
+        )
+        .map_err(|e| {
+            let _ = conn.execute("ROLLBACK", []);
+            format!("Failed to update stock: {}", e)
+        })?;
+    if n == 0 {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!(
+            "Insufficient stock for '{}' (available {}, requested {}).",
+            prod_name, available, qty
+        ));
+    }
+
+    if let Err(e) = recompute_customer_buckets(conn, customer_id) {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Failed to update khata buckets: {}", e));
+    }
+
+    conn.execute("COMMIT", []).map_err(|e| {
+        let _ = conn.execute("ROLLBACK", []);
+        e.to_string()
+    })?;
+
+    Ok((entry_id, amount))
+}
