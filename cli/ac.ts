@@ -31,6 +31,7 @@
  * Sign conventions (MUST match src-tauri/src — do not change here):
  *   customer_payments: payment -> -amount | opening_debit -> +amount
  *                      adjustment -> +amount (stored signed)
+ *                      advance_return -> +amount (v0.44.1; net delta +)
  *
  * Privacy: phone numbers are masked by default. NEVER paste real
  * customer names/phones into ecosystem-hq issues — mask or use IDs.
@@ -106,13 +107,22 @@ function die(msg: string): never {
 
 // Customer outstanding, computed from ledger (source of truth).
 // entry_type signs: payment -> -amount, opening_debit -> +amount,
-// adjustment -> +amount (amount stored signed, may be negative).
+// adjustment -> +amount (stored signed, may be negative),
+// advance_return -> +amount (v0.44.1 entry: advance wapas diya).
 // v0.35.0: CANONICAL customer outstanding — mirrors the GUI app's khata
 // (get_customer_balance_history + every write path) EXACTLY:
 //   SUM(sales.balance WHERE NOT reversed)   <- udhar sale debts (v0.26+)
 //   - SUM(payments)  [+ opening_debit] [+ adjustment (signed)]
 // entry_type may be NULL on pre-v0.29 rows — treat NULL as 'payment'.
 // customers.outstanding_balance is a maintained CACHE of this value.
+// v0.44.2 (Haji fix): v0.44.1 added 'advance_return' to the Rust
+// CANONICAL_OUTSTANDING_SQL (5-term) but this read-CLI mirror was missed
+// — customers WITH advance_return rows showed a net LOWER by the
+// returned amount (live case: -100,000 shown vs -50,000 correct), the
+// khata effect map printed 0 for the row, and `db health` raised a
+// FALSE drift alarm. Keep this string term-equal to
+// src-tauri/src/customers/mod.rs CANONICAL_OUTSTANDING_SQL — the drift
+// check, net summary, dashboard and weekly report all reuse it.
 const CUSTOMER_OUTSTANDING_SQL = `
   COALESCE((SELECT SUM(s.balance) FROM sales s
             WHERE s.customer_id = c.id AND COALESCE(s.reversed, 0) = 0), 0.0)
@@ -121,7 +131,9 @@ const CUSTOMER_OUTSTANDING_SQL = `
   + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
               WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'opening_debit'), 0.0)
   + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
-              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)`;
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'adjustment'), 0.0)
+  + COALESCE((SELECT SUM(p.amount) FROM customer_payments p
+              WHERE p.customer_id = c.id AND COALESCE(p.entry_type, 'payment') = 'advance_return'), 0.0)`;
 
 function direction(n: number): "RECEIVABLE" | "PAYABLE" | "ZERO" {
   if (n > 0.004) return "RECEIVABLE"; // green: HO ko lena hai
@@ -210,9 +222,12 @@ function customersKhata(key: string) {
         notes: `${s.product ?? "?"} x${s.qty} (udhar balance)`, sale_id: null })),
     ...payRows.map(e => ({ id: e.id, date: e.date, type: e.entry_type,
         amount: e.amount,
+        // v0.44.2: advance_return -> +e.amount (Rust history parity —
+        // udhar_commands.rs 'Advance wapas diya: ...' branch, net delta +amount)
         effect: e.entry_type === "payment" ? -e.amount
               : e.entry_type === "opening_debit" ? e.amount
-              : e.entry_type === "adjustment" ? e.amount : 0,
+              : e.entry_type === "adjustment" ? e.amount
+              : e.entry_type === "advance_return" ? e.amount : 0,
         notes: e.notes ?? "", sale_id: e.sale_id })),
   ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.type === "sale" ? -1 : 1) - (b.type === "sale" ? -1 : 1)));
 
