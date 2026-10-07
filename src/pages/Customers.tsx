@@ -495,16 +495,17 @@ export default function Customers() {
                         >
                           <Sliders size={14} />
                         </button>
-                        {/* History button — always visible (even if balance=0) */}
-                        {(c.outstanding_balance || 0) === 0 && (
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); handleShowBalanceHistory(c); }}
-                            className="text-blue-400 hover:text-blue-300 transition-colors p-1"
-                            title="View Khata History"
-                          >
-                            <Wallet size={14} />
-                          </button>
-                        )}
+                        {/* v0.45.2 fix: History button ALWAYS visible — v0.45.1 had an
+                            inverted `=== 0` guard (hid history from exactly the non-zero
+                            balance customers who need it; owner GUI-check finding,
+                            pi report chk b001d5dd). Modal itself was always complete. */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleShowBalanceHistory(c); }}
+                          className="text-blue-400 hover:text-blue-300 transition-colors p-1"
+                          title="View Khata History"
+                        >
+                          <Wallet size={14} />
+                        </button>
                       </>
                     )}
                     <button 
