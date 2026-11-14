@@ -50,6 +50,12 @@ export default function Customers() {
   // flow: cloth instead of cash). Products are lazy-loaded when the modal
   // opens for a negative-balance customer; amount auto = qty * sale_price.
   const [settleGoodsMode, setSettleGoodsMode] = useState(false)
+  // v0.45.3 (F2, chk e24e4d1d): payment modal mode by BUCKET — 'green' =
+  // udhaar wasooli (record_customer_payment), 'red' = advance settle
+  // (advance_return / goods). Mixed-bucket customer (dono > 0) opens
+  // green-first; owner switches via the modal toggle. Purana net-sign
+  // routing F2 bug tha (net<0 → hamesha red path).
+  const [payMode, setPayMode] = useState<'green' | 'red'>('green')
   const [settleProducts, setSettleProducts] = useState<any[]>([])
   const [settleProductId, setSettleProductId] = useState<number | null>(null)
   const [settleQty, setSettleQty] = useState(1)
@@ -133,15 +139,23 @@ export default function Customers() {
   // because record_customer_payment rejects amounts exceeding a positive balance.
   const handleOpenPaymentModal = (customer: Customer) => {
     setPaymentCustomer(customer)
-    setPaymentAmount(Math.abs(customer.outstanding_balance || 0))
+    // v0.45.3 fix (F2): default amount + mode BUCKETS se, abs(net) se nahi.
+    // Customer #3 (green 9,400 / red 79,000 / net -69,600) pehle 69,600
+    // default ke saath red route par khulta tha — ab green mode, default
+    // 9,400 (exact udhaar).
+    const hasGreen = (customer.udhaar_gross || 0) > 0.004
+    const hasRed = (customer.advance_gross || 0) > 0.004
+    setPayMode(hasGreen ? 'green' : 'red')
+    setPaymentAmount(hasGreen ? (customer.udhaar_gross || 0) : (customer.advance_gross || 0))
     setPaymentNotes('')
-    // v0.45.1: reset goods-settle state; load settleable stock only when
-    // this is a debt-settlement (negative balance = advance bucket > 0).
+    // v0.45.1: reset goods-settle state; v0.45.3: settleable stock load
+    // whenever the RED bucket exists (goods settle advance) — positive-net
+    // customer ke paas bhi red bucket ho sakta hai.
     setSettleGoodsMode(false)
     setSettleProductId(null)
     setSettleQty(1)
     setShowPaymentModal(true)
-    if ((customer.outstanding_balance || 0) < 0) {
+    if (hasRed) {
       invoke<any[]>('get_products')
         .then(rows => {
           setSettleProducts((rows || []).filter((p: any) =>
@@ -157,15 +171,19 @@ export default function Customers() {
     if (!paymentCustomer?.id) return
     if (paymentAmount <= 0) { alert('Payment amount must be positive.'); return }
     try {
-      if ((paymentCustomer.outstanding_balance || 0) >= 0) {
-        // Normal flow: customer pays us
+      const hasGreen = (paymentCustomer.udhaar_gross || 0) > 0.004
+      if (hasGreen && payMode === 'green') {
+        // v0.45.3 fix (F2): GREEN routing BUCKET par, net-sign par nahi.
+        // Mixed customer (green > 0, net < 0) ki wasooli ab record_customer_
+        // payment se: exact-green settle, excess backend waterfall (v0.44.1
+        // bucket_cash_in) se red mein. advance_return is path par kabhi nahi.
         await invoke('record_customer_payment', {
           customerId: paymentCustomer.id,
           amount: paymentAmount,
           notes: paymentNotes || null,
           saleId: null,
         })
-      } else if (settleGoodsMode && settleProductId) {
+      } else if (payMode === 'red' && settleGoodsMode && settleProductId) {
         // v0.45.1: settle the advance bucket with STOCK (Haji flow) — one
         // backend transaction: stock decrement + advance_return ledger row
         // + bucket recompute. Amount is computed from qty * sale_price.
@@ -182,11 +200,11 @@ export default function Customers() {
         await fetchCustomers()
         alert(`Goods se settle ho gaya! Rs. ${(res?.amount ?? 0).toFixed(0)} — ${paymentCustomer.name}`)
         return
-      } else if (settleGoodsMode) {
+      } else if (payMode === 'red' && settleGoodsMode) {
         // goods toggle ON but no product chosen — do NOT fall through to cash
         alert('Product select karen (ya Cash mode par wapas jayen).')
         return
-      } else {
+      } else if (payMode === 'red') {
         // v0.44.1: settle the RED bucket via the explicit advance_return
         // entry type (no-netting rule). A negative adjustment would now
         // mean "advance liya" (DENA barhta) — the settle direction is its
@@ -198,6 +216,11 @@ export default function Customers() {
           entryDate: null,
           notes: paymentNotes || 'Advance settle (hum ne wapas diya)',
         })
+      } else {
+        // v0.45.3: belt-and-suspenders — no bucket settleable (payment
+        // button hidden for a 0/0 khata, so this should be unreachable).
+        alert('Is customer ka koi bucket settle nahi ho sakta.')
+        return
       }
       setShowPaymentModal(false)
       await fetchCustomers()
@@ -467,13 +490,18 @@ export default function Customers() {
                     <p className="text-xs text-gray-400 flex items-center"><Phone size={10} className="mr-1" />{c.phone || '-'}</p>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {/* v0.34.0: Record Payment — green icon when they owe us (udhar),
-                        red icon when we owe them (settle advance debt) */}
-                    {(c.outstanding_balance || 0) !== 0 && c.id && (
+                    {/* v0.45.3 fix (F3 + latent net-0 bug): payment button BUCKETS
+                        se — visible whenever EITHER bucket has value (net 0 +
+                        dono buckets bhare = purana `(net)!==0` gate button ko
+                        gayab kar deta tha). Green icon when udhaar (lena), red
+                        when advance-only (dena). */}
+                    {c.id && ((c.udhaar_gross || 0) > 0.004 || (c.advance_gross || 0) > 0.004) && (
                       <button 
                         onClick={(e) => { e.stopPropagation(); handleOpenPaymentModal(c); }}
-                        className={`${(c.outstanding_balance || 0) > 0 ? 'text-emerald-400 hover:text-emerald-300' : 'text-red-400 hover:text-red-300'} transition-colors p-1`}
-                        title={(c.outstanding_balance || 0) > 0 ? 'Record Payment (lena hai)' : 'Settle Debt (dena hai)'}
+                        className={`${(c.udhaar_gross || 0) > 0.004 ? 'text-emerald-400 hover:text-emerald-300' : 'text-red-400 hover:text-red-300'} transition-colors p-1`}
+                        title={(c.udhaar_gross || 0) > 0.004
+                          ? ((c.advance_gross || 0) > 0.004 ? 'Payment / Advance Settle (dono buckets)' : 'Record Payment (lena hai)')
+                          : 'Settle Debt (dena hai)'}
                       >
                         <Banknote size={14} />
                       </button>
@@ -668,7 +696,10 @@ export default function Customers() {
           <div className="bg-slate-900 border border-gray-800 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
             <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-slate-950/40">
               <h3 className="text-lg font-bold text-white">
-                {(paymentCustomer.outstanding_balance || 0) > 0 ? 'Record Payment' : 'Settle Debt (Hum ko dena hai)'}
+                {/* v0.45.3 fix (F2/L671): header mode se — mixed customer
+                    (net<0) pehle 'Settle Debt' dikhta tha jabki uska Lena
+                    tha; ab bucket mode decide karta hai. */}
+                {payMode === 'green' ? 'Record Payment (Udhaar Wasooli)' : 'Settle Debt (Hum ko dena hai)'}
               </h3>
               <button onClick={() => setShowPaymentModal(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
             </div>
@@ -689,6 +720,21 @@ export default function Customers() {
                   <p className="text-xl font-extrabold text-red-400">{fmtMoney(paymentCustomer.advance_gross || 0)}</p>
                 </div>
               </div>
+              {/* v0.45.3: bucket mode toggle — mixed customer (dono buckets > 0)
+                  ke liye owner green (wasooli) ya red (advance settle) choose
+                  kare. Purana net-sign routing sirf ek option kholta tha. */}
+              {(paymentCustomer.udhaar_gross || 0) > 0.004 && (paymentCustomer.advance_gross || 0) > 0.004 && (
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => { setPayMode('green'); setPaymentAmount(paymentCustomer.udhaar_gross || 0); setSettleGoodsMode(false); setSettleProductId(null) }}
+                    className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${payMode === 'green' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}`}
+                  >Lena wasooli (payment)</button>
+                  <button
+                    onClick={() => { setPayMode('red'); setPaymentAmount(paymentCustomer.advance_gross || 0); setSettleGoodsMode(false); setSettleProductId(null) }}
+                    className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${payMode === 'red' ? 'bg-red-600 text-white' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}`}
+                  >Dena settle (advance)</button>
+                </div>
+              )}
               <div className={`rounded-lg p-3 flex justify-between items-center border ${
                 (paymentCustomer.outstanding_balance || 0) >= 0
                   ? 'bg-amber-900/20 border-amber-700/50'
@@ -701,8 +747,10 @@ export default function Customers() {
                   {fmtMoney(Math.abs(paymentCustomer.outstanding_balance || 0))}
                 </span>
               </div>
-              {/* v0.45.1: settle mode toggle — goods form only for debt settlement */}
-              {(paymentCustomer.outstanding_balance || 0) < 0 && (
+              {/* v0.45.1: settle mode toggle; v0.45.3: gate RED MODE par
+                  (net<0 nahi) — mixed customer red mode mein bhi goods se
+                  settle kar sakta hai. */}
+              {payMode === 'red' && (
                 <div className="flex gap-1">
                   <button
                     onClick={() => setSettleGoodsMode(false)}
@@ -714,7 +762,7 @@ export default function Customers() {
                   >Maal se settle (kapra)</button>
                 </div>
               )}
-              {settleGoodsMode && (paymentCustomer.outstanding_balance || 0) < 0 ? (
+              {settleGoodsMode && payMode === 'red' ? (
                 <div className="space-y-2">
                   <div>
                     <label className="block text-xs font-semibold uppercase text-gray-400 mb-1">Product (active stock)</label>
@@ -758,8 +806,20 @@ export default function Customers() {
                   onChange={e => setPaymentAmount(Math.max(0, Number(e.target.value)))}
                   className="w-full bg-slate-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-violet-500"
                 />
+                {/* v0.45.3 fix (F2/L762): preview BUCKETS dikhata hai — net
+                    arithmetic mixed customer par galat result deta tha.
+                    Green mode: Lena ghatti hai, excess Dena barhata hai
+                    (v0.44.1 waterfall); red mode: Dena ghatta hai. */}
                 <p className="text-[10px] text-gray-600 mt-1">
-                  New balance after payment: <span className="text-gray-400">{fmtMoney((paymentCustomer.outstanding_balance || 0) + ((paymentCustomer.outstanding_balance || 0) >= 0 ? -paymentAmount : paymentAmount))}</span>
+                  {payMode === 'green' ? (
+                    <>Payment ke baad: Lena <span className="text-emerald-400">{fmtMoney(Math.max(0, (paymentCustomer.udhaar_gross || 0) - paymentAmount))}</span>
+                      {paymentAmount > (paymentCustomer.udhaar_gross || 0) + 0.004 && (
+                        <> · Excess Rs. {fmtMoney(paymentAmount - (paymentCustomer.udhaar_gross || 0))} Dena mein jayega: <span className="text-red-400">{fmtMoney((paymentCustomer.advance_gross || 0) + paymentAmount - (paymentCustomer.udhaar_gross || 0))}</span></>
+                      )}
+                    </>
+                  ) : (
+                    <>Settle ke baad: Dena <span className="text-red-400">{fmtMoney(Math.max(0, (paymentCustomer.advance_gross || 0) - paymentAmount))}</span></>
+                  )}
                 </p>
               </div>
               )}
@@ -776,7 +836,7 @@ export default function Customers() {
               <div className="flex gap-2 pt-2">
                 <button onClick={() => setShowPaymentModal(false)} className="flex-1 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-gray-200 rounded-lg text-sm">Cancel</button>
                 <button onClick={handleRecordPayment} className="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium">
-                  {settleGoodsMode && (paymentCustomer.outstanding_balance || 0) < 0 ? 'Settle with Goods' : 'Save Payment'}
+                  {settleGoodsMode && payMode === 'red' ? 'Settle with Goods' : payMode === 'green' ? 'Save Payment' : 'Save Advance Return'}
                 </button>
               </div>
             </div>

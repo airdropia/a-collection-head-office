@@ -35,5 +35,10 @@ jobs:
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      # v0.45.3: khata bucket regression suite (F1 fix) — CI ab tests
+      # bhi run karta hai (pehle sirf tsc/check/build tha).
+      - name: Rust test (khata bucket regression)
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Vite build
         run: npm run build

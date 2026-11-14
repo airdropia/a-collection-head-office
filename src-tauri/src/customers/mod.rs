@@ -404,22 +404,55 @@ pub fn record_payment_impl(
     conn.execute("BEGIN IMMEDIATE", [])
         .map_err(|e| e.to_string())?;
 
-    let current_balance: f64 = conn
+    // v0.45.3: customer existence check (COUNT) — the v0.35.0 net-balance
+    // read and its guard are gone (see F1 note below), but a missing
+    // customer must still fail fast before any ledger write.
+    let found: i64 = conn
         .query_row(
-            "SELECT COALESCE(outstanding_balance, 0.0) FROM customers WHERE id = ?1",
+            "SELECT COUNT(*) FROM customers WHERE id = ?1",
             params![customer_id],
             |r| r.get(0),
         )
         .map_err(|e| {
             let _ = conn.execute("ROLLBACK", []);
-            format!("Customer not found: {}", e)
+            format!("Customer lookup failed: {}", e)
         })?;
+    if found == 0 {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(format!("Customer not found: id {}", customer_id));
+    }
 
-    if amount > current_balance {
+    // v0.45.3 fix (F1, pi report chk ce2235f1 / comment 6875524382):
+    // the v0.35.0 guard compared `amount > NET outstanding_balance` — on a
+    // mixed-bucket customer (green > 0, red > 0, net < 0) EVERY positive
+    // payment was rejected: cash wasooli was impossible (customer #3:
+    // green 9,400 / red 79,000 / net -69,600; CLI error "exceeds
+    // outstanding balance (Rs. -69600)").
+    //
+    // v0.44.1 no-netting world: a payment settles GREEN first
+    // (bucket_cash_in — green first, excess lands in red as new advance);
+    // the RED bucket is settled by advance_return only. So the guard now
+    // validates against the GREEN bucket, freshly computed inside this
+    // transaction (never the cached columns — same pattern as the
+    // advance_return guard below):
+    //   - green <= 0  -> reject: payment would settle nothing and only grow
+    //     red (danger: recording a "payment" against a red-only customer
+    //     would DOUBLE the advance instead of settling it).
+    //   - green > 0   -> no upper bound: exact-green settles the udhaar
+    //     fully; excess flows into red per the v0.44.1 waterfall (the
+    //     "over-green payment excess -> red" regression case must PASS).
+    let buckets = match compute_customer_buckets(conn, customer_id) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e);
+        }
+    };
+    if buckets.udhaar_gross <= 0.004 {
         let _ = conn.execute("ROLLBACK", []);
         return Err(format!(
-            "Payment (Rs. {:.0}) exceeds outstanding balance (Rs. {:.0}).",
-            amount, current_balance
+            "Customer's udhaar (green) bucket is Rs. {:.0} — a payment would settle no udhaar and only grow the advance (red) bucket. Use advance_return to settle the advance.",
+            buckets.advance_gross
         ));
     }
 
@@ -713,4 +746,171 @@ pub fn settle_advance_with_goods_impl(
     })?;
 
     Ok((entry_id, amount))
+}
+
+// ============================================================
+// v0.45.3 — khata bucket regression tests (F1 fix, pi report
+// chk ce2235f1 + e24e4d1d). Run via CI `cargo test` (windows-latest).
+// Mixed-bucket khata: green (udhaar_gross) via credit sale, red
+// (advance_gross) via negative adjustment — v0.44.1 waterfall kinds.
+// ============================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn test_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        crate::database::run_migrations_public(&mut conn)
+            .expect("migrations must build the full schema");
+        conn
+    }
+
+    fn add_customer(conn: &Connection, name: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO customers (name, phone, created_at) VALUES (?1, NULL, ?2)",
+            params![name, "2026-11-01T00:00:00Z"],
+        )
+        .expect("insert customer");
+        conn.last_insert_rowid()
+    }
+
+    /// Green bucket source: credit sale (balance > 0, reversed = 0) — kind 0.
+    fn add_credit_sale(conn: &Connection, customer_id: i64, balance: f64) {
+        conn.execute(
+            "INSERT INTO sales (sale_date, created_at, updated_at, customer_id, balance)
+             VALUES ('2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', ?1, ?2)",
+            params![customer_id, balance],
+        )
+        .expect("insert credit sale");
+    }
+
+    /// Red bucket source: negative adjustment (v0.44.1: advance liya —
+    /// pure RED, kind 2).
+    fn add_advance(conn: &Connection, customer_id: i64, amount: f64) {
+        conn.execute(
+            "INSERT INTO customer_payments (customer_id, amount, payment_date, notes, entry_type, created_at, updated_at)
+             VALUES (?1, ?2, '2026-11-02T00:00:00Z', 'test advance', 'adjustment', '2026-11-02T00:00:00Z', '2026-11-02T00:00:00Z')",
+            params![customer_id, -amount],
+        )
+        .expect("insert advance adjustment");
+    }
+
+    fn buckets(conn: &Connection, customer_id: i64) -> CustomerBuckets {
+        compute_customer_buckets(conn, customer_id).expect("compute buckets")
+    }
+
+    fn cached_net(conn: &Connection, customer_id: i64) -> f64 {
+        conn.query_row(
+            "SELECT COALESCE(outstanding_balance, 0.0) FROM customers WHERE id = ?1",
+            params![customer_id],
+            |r| r.get(0),
+        )
+        .expect("read cached net")
+    }
+
+    /// Customer #3 reproduction (pi report chk ce2235f1): green 9,400 /
+    /// red 79,000 / net -69,600. The v0.35.0 net guard rejected the EXACT
+    /// green payment ("exceeds outstanding balance (Rs. -69600)") — after
+    /// the F1 fix the exact-green wasooli must settle green only, red
+    /// untouched (no-netting), net = -79,000.
+    #[test]
+    fn payment_exact_green_on_mixed_bucket_customer() {
+        let conn = test_conn();
+        let cid = add_customer(&conn, "khata-mixed");
+        add_credit_sale(&conn, cid, 9400.0);
+        add_advance(&conn, cid, 79000.0);
+
+        let pre = buckets(&conn, cid);
+        assert!((pre.udhaar_gross - 9400.0).abs() < 0.004);
+        assert!((pre.advance_gross - 79000.0).abs() < 0.004);
+
+        record_payment_impl(&conn, cid, 9400.0, Some("cash by hand"), None)
+            .expect("exact-green payment on mixed-bucket customer must succeed");
+
+        let b = buckets(&conn, cid);
+        assert!((b.udhaar_gross - 0.0).abs() < 0.004, "green must settle to 0");
+        assert!(
+            (b.advance_gross - 79000.0).abs() < 0.004,
+            "red must be untouched (no-netting: payment never reduces red)"
+        );
+        assert!((cached_net(&conn, cid) - (-79000.0)).abs() < 0.004,
+            "net must be green - red = -79,000");
+    }
+
+    /// Over-green payment: excess lands in RED (bucket_cash_in: green
+    /// first, `red += p - applied`) — pi regression case "over-green
+    /// payment (excess -> red)" must PASS.
+    #[test]
+    fn payment_over_green_excess_lands_in_red() {
+        let conn = test_conn();
+        let cid = add_customer(&conn, "khata-over-green");
+        add_credit_sale(&conn, cid, 9400.0);
+        add_advance(&conn, cid, 79000.0);
+
+        record_payment_impl(&conn, cid, 12000.0, None, None)
+            .expect("over-green payment must succeed (no upper bound)");
+
+        let b = buckets(&conn, cid);
+        assert!((b.udhaar_gross - 0.0).abs() < 0.004);
+        assert!(
+            (b.advance_gross - 81600.0).abs() < 0.004,
+            "excess 2,600 must land in red: 79,000 + 2,600 = 81,600"
+        );
+    }
+
+    /// Green-only payment against a red-only customer is rejected — a
+    /// "payment" there settles nothing and would only grow red (danger:
+    /// 79k-style advance doubles). Red settlement is advance_return's job.
+    #[test]
+    fn payment_rejected_when_green_bucket_zero() {
+        let conn = test_conn();
+        let cid = add_customer(&conn, "khata-red-only");
+        add_advance(&conn, cid, 79000.0);
+
+        let err = record_payment_impl(&conn, cid, 9400.0, None, None)
+            .expect_err("payment on green-0 customer must be rejected");
+        assert!(
+            err.contains("green"),
+            "error must point to the green bucket: {}",
+            err
+        );
+
+        let b = buckets(&conn, cid);
+        assert!((b.advance_gross - 79000.0).abs() < 0.004, "red untouched after reject");
+    }
+
+    /// Regression: positive-net customer's normal partial payment flow
+    /// (v0.26.0 era) must behave identically under the v0.45.3 guard.
+    #[test]
+    fn payment_partial_green_still_works() {
+        let conn = test_conn();
+        let cid = add_customer(&conn, "khata-simple");
+        add_credit_sale(&conn, cid, 5000.0);
+
+        record_payment_impl(&conn, cid, 2000.0, None, None)
+            .expect("partial payment on positive-net customer must succeed");
+
+        let b = buckets(&conn, cid);
+        assert!((b.udhaar_gross - 3000.0).abs() < 0.004);
+        assert!((b.advance_gross - 0.0).abs() < 0.004);
+    }
+
+    /// Old sanity guards that must survive the rewrite: non-positive
+    /// amounts and missing customers still fail fast.
+    #[test]
+    fn payment_rejects_nonpositive_amount() {
+        let conn = test_conn();
+        let cid = add_customer(&conn, "khata-zero");
+        assert!(record_payment_impl(&conn, cid, 0.0, None, None).is_err());
+        assert!(record_payment_impl(&conn, cid, -500.0, None, None).is_err());
+    }
+
+    #[test]
+    fn payment_customer_not_found() {
+        let conn = test_conn();
+        let err = record_payment_impl(&conn, 9999, 100.0, None, None)
+            .expect_err("unknown customer must be rejected");
+        assert!(err.contains("not found"), "error: {}", err);
+    }
 }
